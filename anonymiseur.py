@@ -58,12 +58,105 @@ def ecrire_reglages(d: dict) -> None:
         pass
 
 
+class Infobulle:
+    """Petite bulle d'aide affichée après un court survol du widget."""
+
+    def __init__(self, widget, texte: str, delai_ms: int = 500):
+        self.widget, self.texte, self.delai = widget, texte, delai_ms
+        self.fenetre = None
+        self.attente = None
+        widget.bind("<Enter>", self._programmer, add="+")
+        widget.bind("<Leave>", self._cacher, add="+")
+        widget.bind("<ButtonPress>", self._cacher, add="+")
+
+    def _programmer(self, _ev=None):
+        self._annuler_attente()
+        self.attente = self.widget.after(self.delai, self.montrer)
+
+    def _annuler_attente(self):
+        if self.attente:
+            self.widget.after_cancel(self.attente)
+            self.attente = None
+
+    def montrer(self):
+        self.attente = None
+        if self.fenetre or not self.widget.winfo_viewable():
+            return
+        x = self.widget.winfo_rootx() + 12
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        self.fenetre = tk.Toplevel(self.widget)
+        self.fenetre.wm_overrideredirect(True)
+        self.fenetre.attributes("-topmost", True)
+        tk.Label(self.fenetre, text=self.texte, justify="left", background="#ffffe0", foreground="#000000",
+                 relief="solid", borderwidth=1, wraplength=360, padx=6, pady=4).pack()
+        self.fenetre.update_idletasks()
+        # rester dans l'écran
+        larg, haut = self.fenetre.winfo_width(), self.fenetre.winfo_height()
+        x = min(x, self.widget.winfo_screenwidth() - larg - 4)
+        if y + haut > self.widget.winfo_screenheight() - 40:
+            y = self.widget.winfo_rooty() - haut - 4
+        self.fenetre.geometry(f"+{x}+{y}")
+
+    def _cacher(self, _ev=None):
+        self._annuler_attente()
+        if self.fenetre:
+            self.fenetre.destroy()
+            self.fenetre = None
+
+
+def bulle(widget, texte: str):
+    """Attache une infobulle et renvoie le widget (pour enchaîner .grid / .pack)."""
+    widget.infobulle = Infobulle(widget, texte)
+    return widget
+
+
+def texte_aide(parent, texte: str):
+    """Paragraphe explicatif dont la largeur suit celle de son parent."""
+    etiquette = ttk.Label(parent, text=texte, justify="left", wraplength=700, foreground="#404040")
+    parent.bind("<Configure>", lambda e: etiquette.configure(wraplength=max(300, e.width - 24)), add="+")
+    return etiquette
+
+
+AIDE_PRINCIPALE = (
+    "Ce programme floute automatiquement les visages et les plaques d'immatriculation des photos JPG d'un "
+    "dossier. Les originaux ne sont jamais modifiés : les photos anonymisées sont écrites dans le dossier de "
+    "sortie.\n"
+    "1) Choisissez le dossier des photos.  2) Réglez les options.  3) Cliquez sur « Anonymiser » pour la "
+    "détection automatique, puis contrôlez le résultat avec « Vérifier / corriger… ». Ou bien utilisez "
+    "« Mode manuel… » pour faire défiler les photos et flouter vous-même au clic.\n"
+    "Tout est traité sur cet ordinateur : aucune photo n'est envoyée sur internet. "
+    "Survolez un bouton ou un réglage pour afficher son aide.")
+
+AIDE_DEPENDANCES = (
+    "Le programme a besoin de bibliothèques Python et de deux modèles de détection. Le tableau indique ce "
+    "qui est installé (OK) ou manquant (MANQUE). Au démarrage, s'il manque quelque chose, le programme "
+    "propose de l'installer. L'installation utilise pip, nécessite une connexion internet et se fait dans "
+    "le Python indiqué ci-dessous. Le modèle des plaques (≈ 27 Mo) n'est téléchargé qu'une fois.")
+
+AIDE_VERIFICATION = (
+    "Contrôle des photos anonymisées. Cadres rouges = visages détectés, bleus = plaques, verts = zones "
+    "ajoutées à la main, pointillés = zones écartées (non floutées).\n"
+    "Clic sur l'image : flouter un carré (cadre jaune, taille réglable à la molette).  Glisser : flouter un "
+    "rectangle.  Clic droit sur une zone : l'écarter ou la réactiver (une zone ajoutée est supprimée).  "
+    "Ctrl+Z : annuler le dernier ajout.  ← → : photo précédente / suivante.\n"
+    "Chaque modification est enregistrée aussitôt. En orange dans la liste : photos où rien n'est flouté, "
+    "à regarder en priorité.")
+
+AIDE_MANUEL = (
+    "Mode manuel : toutes les photos du dossier défilent avec les flèches ← →.\n"
+    "Clic sur l'image : flouter un carré centré sur le clic (cadre jaune, taille réglable à la molette).  "
+    "Glisser : flouter un rectangle.  Clic droit sur une zone : la retirer.  Ctrl+Z : annuler le dernier "
+    "ajout.\n"
+    "La photo est enregistrée dans la sortie dès que vous passez à une autre photo ou fermez la fenêtre. "
+    "✓ = photo enregistrée, orange = pas encore enregistrée ; la barre compte les photos enregistrées.")
+
+
 class Application(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Anonymiseur de photos — visages et plaques")
-        self.geometry("760x600")
-        self.minsize(640, 480)
+        self.geometry("820x800")
+        self.minsize(680, 600)
         r = lire_reglages()
 
         self.v_source = tk.StringVar(value=r.get("source", ""))
@@ -99,71 +192,105 @@ class Application(tk.Tk):
     # ------------------------------------------------------------------ UI
     def _construire(self, page):
         pad = {"padx": 8, "pady": 4}
+        texte_aide(page, AIDE_PRINCIPALE).pack(fill="x", padx=10, pady=(8, 2))
         cadre = ttk.LabelFrame(page, text="Dossiers")
         cadre.pack(fill="x", **pad)
         ttk.Label(cadre, text="Photos (JPG) :").grid(row=0, column=0, sticky="w", **pad)
-        ttk.Entry(cadre, textvariable=self.v_source).grid(row=0, column=1, sticky="ew", **pad)
-        ttk.Button(cadre, text="Choisir…", command=self._choisir_source).grid(row=0, column=2, **pad)
+        bulle(ttk.Entry(cadre, textvariable=self.v_source),
+              "Dossier contenant les photos JPG à anonymiser. Rien n'y est modifié.").grid(
+            row=0, column=1, sticky="ew", **pad)
+        bulle(ttk.Button(cadre, text="Choisir…", command=self._choisir_source),
+              "Choisir le dossier des photos. La sortie est alors proposée dans son sous-dossier "
+              "« anonymisé ».").grid(row=0, column=2, **pad)
         ttk.Label(cadre, text="Sortie :").grid(row=1, column=0, sticky="w", **pad)
-        ttk.Entry(cadre, textvariable=self.v_sortie).grid(row=1, column=1, sticky="ew", **pad)
-        ttk.Button(cadre, text="Choisir…", command=self._choisir_sortie).grid(row=1, column=2, **pad)
-        ttk.Checkbutton(cadre, text="Inclure les sous-dossiers", variable=self.v_sous_dossiers).grid(
-            row=2, column=1, sticky="w", **pad)
+        bulle(ttk.Entry(cadre, textvariable=self.v_sortie),
+              "Dossier où sont écrites les photos anonymisées. Il doit être différent du dossier des "
+              "photos.").grid(row=1, column=1, sticky="ew", **pad)
+        bulle(ttk.Button(cadre, text="Choisir…", command=self._choisir_sortie),
+              "Choisir un autre dossier de sortie.").grid(row=1, column=2, **pad)
+        bulle(ttk.Checkbutton(cadre, text="Inclure les sous-dossiers", variable=self.v_sous_dossiers),
+              "Traiter aussi les photos des sous-dossiers ; leur arborescence est reproduite dans la "
+              "sortie.").grid(row=2, column=1, sticky="w", **pad)
         cadre.columnconfigure(1, weight=1)
 
         opt = ttk.LabelFrame(page, text="Options")
         opt.pack(fill="x", **pad)
-        ttk.Checkbutton(opt, text="Visages", variable=self.v_visages).grid(row=0, column=0, sticky="w", **pad)
-        ttk.Checkbutton(opt, text="Plaques d'immatriculation", variable=self.v_plaques).grid(
+        bulle(ttk.Checkbutton(opt, text="Visages", variable=self.v_visages),
+              "Détecter et flouter automatiquement les visages.").grid(row=0, column=0, sticky="w", **pad)
+        bulle(ttk.Checkbutton(opt, text="Plaques d'immatriculation", variable=self.v_plaques),
+              "Détecter et flouter automatiquement les plaques d'immatriculation.").grid(
             row=0, column=1, sticky="w", **pad)
         ttk.Label(opt, text="Méthode :").grid(row=1, column=0, sticky="w", **pad)
-        ttk.Combobox(opt, textvariable=self.v_methode, state="readonly", width=12,
-                     values=["flou", "pixels", "noir"]).grid(row=1, column=1, sticky="w", **pad)
+        bulle(ttk.Combobox(opt, textvariable=self.v_methode, state="readonly", width=12,
+                           values=["flou", "pixels", "noir"]),
+              "flou : mosaïque adoucie (le plus discret).\npixels : mosaïque visible.\n"
+              "noir : zone masquée en noir (le plus sûr).").grid(row=1, column=1, sticky="w", **pad)
         ttk.Label(opt, text="Force du floutage :").grid(row=2, column=0, sticky="w", **pad)
-        tk.Scale(opt, from_=1, to=5, orient="horizontal", variable=self.v_force, length=180).grid(
+        bulle(tk.Scale(opt, from_=1, to=5, orient="horizontal", variable=self.v_force, length=180),
+              "1 = léger, 5 = très fort : plus c'est fort, plus les blocs de la mosaïque sont gros.").grid(
             row=2, column=1, sticky="w", **pad)
         ttk.Label(opt, text="Sensibilité de détection :").grid(row=3, column=0, sticky="w", **pad)
-        tk.Scale(opt, from_=1, to=5, orient="horizontal", variable=self.v_sensibilite, length=180).grid(
-            row=3, column=1, sticky="w", **pad)
+        bulle(tk.Scale(opt, from_=1, to=5, orient="horizontal", variable=self.v_sensibilite, length=180),
+              "Plus haut : moins d'oublis mais davantage de fausses détections, à écarter ensuite dans "
+              "« Vérifier / corriger… ».").grid(row=3, column=1, sticky="w", **pad)
         ttk.Label(opt, text="(5 = trouve plus de choses, mais plus de fausses alertes)",
                   foreground="gray").grid(row=3, column=2, sticky="w", **pad)
-        ttk.Checkbutton(opt, text="Supprimer les métadonnées (GPS, appareil, date…)",
-                        variable=self.v_metadonnees).grid(row=4, column=0, columnspan=3, sticky="w", **pad)
-        ttk.Checkbutton(opt, text="Ignorer les photos déjà anonymisées dans la sortie",
-                        variable=self.v_deja).grid(row=5, column=0, columnspan=3, sticky="w", **pad)
-        ttk.Checkbutton(opt, text="Enregistrer aussi les photos sans floutage (le dossier de sortie contient "
-                                  "toutes les photos)", variable=self.v_copier).grid(
+        bulle(ttk.Checkbutton(opt, text="Supprimer les métadonnées (GPS, appareil, date…)",
+                              variable=self.v_metadonnees),
+              "Coché : les photos de sortie ne contiennent plus aucune information EXIF.\nDécoché : ces "
+              "informations sont gardées, sauf la position GPS qui est toujours retirée.").grid(
+            row=4, column=0, columnspan=3, sticky="w", **pad)
+        bulle(ttk.Checkbutton(opt, text="Ignorer les photos déjà anonymisées dans la sortie",
+                              variable=self.v_deja),
+              "Pour reprendre un traitement interrompu : les photos déjà présentes dans la sortie ne sont "
+              "pas retraitées.").grid(row=5, column=0, columnspan=3, sticky="w", **pad)
+        bulle(ttk.Checkbutton(opt, text="Enregistrer aussi les photos sans floutage (le dossier de sortie "
+                                        "contient toutes les photos)", variable=self.v_copier),
+              "Coché : les photos où rien n'est flouté sont aussi recopiées dans la sortie, avec la qualité "
+              "JPG choisie.\nDécoché : seules les photos floutées sont écrites.").grid(
             row=6, column=0, columnspan=3, sticky="w", **pad)
         ttk.Label(opt, text="Qualité JPG enregistrée :").grid(row=7, column=0, sticky="w", **pad)
-        tk.Scale(opt, from_=50, to=100, orient="horizontal", variable=self.v_qualite, length=180).grid(
-            row=7, column=1, sticky="w", **pad)
+        bulle(tk.Scale(opt, from_=50, to=100, orient="horizontal", variable=self.v_qualite, length=180),
+              "Compression des JPG écrits dans la sortie (photos floutées et recopiées). 92 par défaut ; "
+              "plus bas = fichiers plus légers mais qualité moindre.").grid(row=7, column=1, sticky="w", **pad)
         ttk.Label(opt, text="(100 = meilleure qualité, fichiers plus lourds ; 85-95 conseillé)",
                   foreground="gray").grid(row=7, column=2, sticky="w", **pad)
 
         bas = ttk.Frame(page)
         bas.pack(fill="x", **pad)
-        self.b_lancer = ttk.Button(bas, text="Anonymiser", command=self._lancer)
+        self.b_lancer = bulle(ttk.Button(bas, text="Anonymiser", command=self._lancer),
+                              "Détecter les visages et plaques sur toutes les photos du dossier et écrire les "
+                              "photos floutées dans la sortie.")
         self.b_lancer.pack(side="left", padx=4)
-        self.b_arreter = ttk.Button(bas, text="Arrêter", command=self.arreter.set, state="disabled")
+        self.b_arreter = bulle(ttk.Button(bas, text="Arrêter", command=self.arreter.set, state="disabled"),
+                               "Interrompre le traitement après la photo en cours. Les photos déjà faites "
+                               "restent dans la sortie.")
         self.b_arreter.pack(side="left", padx=4)
-        self.b_verifier = ttk.Button(bas, text="Vérifier / corriger…", command=self._verifier)
+        self.b_verifier = bulle(ttk.Button(bas, text="Vérifier / corriger…", command=self._verifier),
+                                "Revoir une à une les photos traitées : ajouter une zone oubliée, écarter une "
+                                "fausse détection.")
         self.b_verifier.pack(side="left", padx=4)
-        self.b_manuel = ttk.Button(bas, text="Mode manuel…", command=self._mode_manuel)
+        self.b_manuel = bulle(ttk.Button(bas, text="Mode manuel…", command=self._mode_manuel),
+                              "Faire défiler toutes les photos avec les flèches ← → et flouter au clic ; "
+                              "chaque photo est enregistrée quand on passe à la suivante.")
         self.b_manuel.pack(side="left", padx=4)
-        ttk.Button(bas, text="Ouvrir la sortie", command=self._ouvrir_sortie).pack(side="left", padx=4)
+        bulle(ttk.Button(bas, text="Ouvrir la sortie", command=self._ouvrir_sortie),
+              "Ouvrir le dossier de sortie dans l'Explorateur Windows.").pack(side="left", padx=4)
 
         ligne = ttk.Frame(page)
         ligne.pack(fill="x", **pad)
         self.compteur = ttk.Label(ligne, text="", width=14, anchor="e")
         self.compteur.pack(side="right", padx=(8, 0))
-        self.progres = ttk.Progressbar(ligne, mode="determinate")
+        self.progres = bulle(ttk.Progressbar(ligne, mode="determinate"),
+                             "Avancement du traitement automatique : photos traitées / total.")
         self.progres.pack(side="left", fill="x", expand=True)
-        self.journal = tk.Text(page, height=12, wrap="word", state="disabled")
+        self.journal = tk.Text(page, height=7, wrap="word", state="disabled")
         self.journal.pack(fill="both", expand=True, **pad)
 
     # ----------------------------------------------------------- dépendances
     def _construire_dependances(self, page):
         pad = {"padx": 8, "pady": 4}
+        texte_aide(page, AIDE_DEPENDANCES).pack(fill="x", padx=10, pady=(8, 2))
         ttk.Label(page, text=f"Python utilisé : {sys.executable}  (version {sys.version.split()[0]})",
                   foreground="gray").pack(anchor="w", **pad)
         colonnes = ("role", "etat", "version", "detail")
@@ -179,12 +306,17 @@ class Application(tk.Tk):
 
         boutons = ttk.Frame(page)
         boutons.pack(fill="x", **pad)
-        self.b_controler = ttk.Button(boutons, text="Contrôler", command=self._controler_dependances)
+        self.b_controler = bulle(ttk.Button(boutons, text="Contrôler", command=self._controler_dependances),
+                                 "Refaire le contrôle des bibliothèques et des modèles.")
         self.b_controler.pack(side="left", padx=4)
-        self.b_installer = ttk.Button(boutons, text="Installer les éléments manquants",
-                                      command=lambda: self._installer(False))
+        self.b_installer = bulle(ttk.Button(boutons, text="Installer les éléments manquants",
+                                            command=lambda: self._installer(False)),
+                                 "Installer avec pip uniquement ce qui manque, puis télécharger le modèle des "
+                                 "plaques si besoin (connexion internet nécessaire).")
         self.b_installer.pack(side="left", padx=4)
-        self.b_maj = ttk.Button(boutons, text="Tout mettre à jour", command=lambda: self._installer(True))
+        self.b_maj = bulle(ttk.Button(boutons, text="Tout mettre à jour", command=lambda: self._installer(True)),
+                           "Réinstaller toutes les bibliothèques dans leur dernière version. Fermer et "
+                           "relancer le programme ensuite.")
         self.b_maj.pack(side="left", padx=4)
 
         self.journal_dep = tk.Text(page, height=10, wrap="word", state="disabled")
@@ -514,13 +646,21 @@ class FenetreVerification(tk.Toplevel):
         droite.pack(side="left", fill="both", expand=True)
         haut = ttk.Frame(droite)
         haut.pack(fill="x")
-        ttk.Button(haut, text="◀ Précédente", command=lambda: self._aller(-1)).pack(side="left", padx=4, pady=4)
-        ttk.Button(haut, text="Suivante ▶", command=lambda: self._aller(1)).pack(side="left", padx=4)
-        ttk.Checkbutton(haut, text="Voir le résultat flouté", variable=self.v_apercu,
-                        command=self._afficher).pack(side="left", padx=12)
-        ttk.Label(haut, text="Clic = flouter · glisser = rectangle · molette = taille · "
-                             "clic droit = retirer · Ctrl+Z = annuler · ← → = photo",
-                  foreground="gray").pack(side="left", padx=8)
+        enreg = " La photo affichée est enregistrée en la quittant." if manuel else ""
+        bulle(ttk.Button(haut, text="◀ Précédente", command=lambda: self._aller(-1)),
+              "Photo précédente (flèche ←)." + enreg).pack(side="left", padx=4, pady=4)
+        bulle(ttk.Button(haut, text="Suivante ▶", command=lambda: self._aller(1)),
+              "Photo suivante (flèche →)." + enreg).pack(side="left", padx=4)
+        bulle(ttk.Button(haut, text="Annuler (Ctrl+Z)", command=self._annuler),
+              "Retirer la dernière zone ajoutée à la main sur cette photo.").pack(side="left", padx=4)
+        bulle(ttk.Checkbutton(haut, text="Voir le résultat flouté", variable=self.v_apercu,
+                              command=self._afficher),
+              "Coché : l'image montre le résultat tel qu'il sera enregistré.\nDécoché : la photo d'origine, "
+              "avec seulement les cadres des zones.").pack(side="left", padx=12)
+        texte_aide(droite, AIDE_MANUEL if manuel else AIDE_VERIFICATION).pack(fill="x", padx=6, pady=(0, 4))
+        bulle(self.liste, "Cliquer sur une photo pour l'afficher. Entre parenthèses : nombre de zones floutées. "
+                          + ("✓ = enregistrée dans la sortie, orange = pas encore enregistrée." if manuel
+                             else "En orange : aucune zone floutée, à vérifier."))
         self.info = ttk.Label(droite, text="")
         self.info.pack(fill="x", padx=4)
         if manuel:
@@ -528,7 +668,8 @@ class FenetreVerification(tk.Toplevel):
             ligne.pack(fill="x", padx=4, pady=2)
             self.compteur = ttk.Label(ligne, text="", anchor="e")
             self.compteur.pack(side="right", padx=(8, 0))
-            self.progres = ttk.Progressbar(ligne, mode="determinate", maximum=max(1, len(self.cles)))
+            self.progres = bulle(ttk.Progressbar(ligne, mode="determinate", maximum=max(1, len(self.cles))),
+                                 "Photos déjà enregistrées dans la sortie / nombre total de photos du dossier.")
             self.progres.pack(side="left", fill="x", expand=True)
         self.canevas = tk.Canvas(droite, background="#202020", highlightthickness=0, cursor="crosshair")
         self.canevas.pack(fill="both", expand=True)

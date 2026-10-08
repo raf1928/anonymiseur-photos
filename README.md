@@ -19,6 +19,8 @@ Au premier usage, le modèle de détection des plaques (≈ 27 Mo) est télécha
 
 ## Utilisation
 
+Chaque fenêtre affiche un texte explicatif en haut ; survoler un bouton ou un réglage affiche une infobulle d'aide.
+
 1. **Choisir…** le dossier des photos. La sortie est proposée dans `<dossier>\anonymisé`.
 2. Options : visages / plaques, méthode (`flou`, `pixels`, `noir`), force, sensibilité,
    sous-dossiers, suppression des métadonnées.
