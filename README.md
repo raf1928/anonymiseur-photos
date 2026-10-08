@@ -5,9 +5,14 @@ Floute automatiquement les **visages** et les **plaques d'immatriculation** des 
 ## Lancer
 
 ```
-pip install -r requirements.txt
 python anonymiseur.py
 ```
+
+Onglet **Dépendances** : contrôle des bibliothèques Python et des modèles de détection (version, état).
+S'il manque quelque chose au démarrage, le programme ouvre cet onglet et propose de l'installer
+(`pip install` dans le Python qui exécute le programme, connexion internet nécessaire). Boutons
+« Installer les éléments manquants » et « Tout mettre à jour ». Installation manuelle possible :
+`pip install -r requirements.txt`.
 
 Au premier usage, le modèle de détection des plaques (≈ 27 Mo) est téléchargé dans
 `%USERPROFILE%\.cache\open-image-models`. Le modèle des visages est fourni dans `modeles/`.

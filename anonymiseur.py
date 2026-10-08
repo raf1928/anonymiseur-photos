@@ -12,16 +12,31 @@ from __future__ import annotations
 import json
 import os
 import queue
+import sys
 import threading
 import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-import cv2
-from PIL import Image, ImageTk
+import dependances as dep
 
-import anonymisation as an
+# Chargés par charger_modules() : absents tant que les dépendances ne sont pas
+# installées, et l'onglet « Dépendances » doit pouvoir s'afficher quand même.
+an = cv2 = Image = ImageTk = None
+
+
+def charger_modules() -> bool:
+    global an, cv2, Image, ImageTk
+    try:
+        import cv2 as _cv2
+        from PIL import Image as _Image, ImageTk as _ImageTk
+        import anonymisation as _an
+    except Exception:
+        return False
+    an, cv2, Image, ImageTk = _an, _cv2, _Image, _ImageTk
+    return True
+
 
 FICHIER_REGLAGES = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "anonymiseur_photos" / "reglages.json"
 NOM_SORTIE = "anonymisé"
@@ -64,15 +79,25 @@ class Application(tk.Tk):
 
         self.file_messages: queue.Queue = queue.Queue()
         self.fil: threading.Thread | None = None
+        self.fil_dep: threading.Thread | None = None
         self.arreter = threading.Event()
-        self._construire()
+        self.modules_ok = charger_modules()
+        self.onglets = ttk.Notebook(self)
+        self.onglets.pack(fill="both", expand=True)
+        self.page_anon = ttk.Frame(self.onglets)
+        self.page_dep = ttk.Frame(self.onglets)
+        self.onglets.add(self.page_anon, text="Anonymisation")
+        self.onglets.add(self.page_dep, text="Dépendances")
+        self._construire(self.page_anon)
+        self._construire_dependances(self.page_dep)
         self.protocol("WM_DELETE_WINDOW", self._fermer)
         self.after(100, self._lire_messages)
+        self.after(300, self._controle_demarrage)
 
     # ------------------------------------------------------------------ UI
-    def _construire(self):
+    def _construire(self, page):
         pad = {"padx": 8, "pady": 4}
-        cadre = ttk.LabelFrame(self, text="Dossiers")
+        cadre = ttk.LabelFrame(page, text="Dossiers")
         cadre.pack(fill="x", **pad)
         ttk.Label(cadre, text="Photos (JPG) :").grid(row=0, column=0, sticky="w", **pad)
         ttk.Entry(cadre, textvariable=self.v_source).grid(row=0, column=1, sticky="ew", **pad)
@@ -84,7 +109,7 @@ class Application(tk.Tk):
             row=2, column=1, sticky="w", **pad)
         cadre.columnconfigure(1, weight=1)
 
-        opt = ttk.LabelFrame(self, text="Options")
+        opt = ttk.LabelFrame(page, text="Options")
         opt.pack(fill="x", **pad)
         ttk.Checkbutton(opt, text="Visages", variable=self.v_visages).grid(row=0, column=0, sticky="w", **pad)
         ttk.Checkbutton(opt, text="Plaques d'immatriculation", variable=self.v_plaques).grid(
@@ -105,7 +130,7 @@ class Application(tk.Tk):
         ttk.Checkbutton(opt, text="Ignorer les photos déjà anonymisées dans la sortie",
                         variable=self.v_deja).grid(row=5, column=0, columnspan=3, sticky="w", **pad)
 
-        bas = ttk.Frame(self)
+        bas = ttk.Frame(page)
         bas.pack(fill="x", **pad)
         self.b_lancer = ttk.Button(bas, text="Anonymiser", command=self._lancer)
         self.b_lancer.pack(side="left", padx=4)
@@ -115,10 +140,100 @@ class Application(tk.Tk):
         self.b_verifier.pack(side="left", padx=4)
         ttk.Button(bas, text="Ouvrir la sortie", command=self._ouvrir_sortie).pack(side="left", padx=4)
 
-        self.progres = ttk.Progressbar(self, mode="determinate")
+        self.progres = ttk.Progressbar(page, mode="determinate")
         self.progres.pack(fill="x", **pad)
-        self.journal = tk.Text(self, height=12, wrap="word", state="disabled")
+        self.journal = tk.Text(page, height=12, wrap="word", state="disabled")
         self.journal.pack(fill="both", expand=True, **pad)
+
+    # ----------------------------------------------------------- dépendances
+    def _construire_dependances(self, page):
+        pad = {"padx": 8, "pady": 4}
+        ttk.Label(page, text=f"Python utilisé : {sys.executable}  (version {sys.version.split()[0]})",
+                  foreground="gray").pack(anchor="w", **pad)
+        colonnes = ("role", "etat", "version", "detail")
+        self.arbre_dep = ttk.Treeview(page, columns=colonnes, height=8)
+        self.arbre_dep.heading("#0", text="Élément")
+        self.arbre_dep.column("#0", width=170)
+        for c, titre, larg in zip(colonnes, ("Rôle", "État", "Version", "Détail"), (230, 70, 80, 200)):
+            self.arbre_dep.heading(c, text=titre)
+            self.arbre_dep.column(c, width=larg)
+        self.arbre_dep.tag_configure("ok", foreground="#118811")
+        self.arbre_dep.tag_configure("manque", foreground="#cc2222")
+        self.arbre_dep.pack(fill="x", **pad)
+
+        boutons = ttk.Frame(page)
+        boutons.pack(fill="x", **pad)
+        self.b_controler = ttk.Button(boutons, text="Contrôler", command=self._controler_dependances)
+        self.b_controler.pack(side="left", padx=4)
+        self.b_installer = ttk.Button(boutons, text="Installer les éléments manquants",
+                                      command=lambda: self._installer(False))
+        self.b_installer.pack(side="left", padx=4)
+        self.b_maj = ttk.Button(boutons, text="Tout mettre à jour", command=lambda: self._installer(True))
+        self.b_maj.pack(side="left", padx=4)
+
+        self.journal_dep = tk.Text(page, height=10, wrap="word", state="disabled")
+        self.journal_dep.pack(fill="both", expand=True, **pad)
+        self._controler_dependances()
+
+    def _ecrire_dep(self, texte: str):
+        self.journal_dep.configure(state="normal")
+        self.journal_dep.insert("end", texte + "\n")
+        self.journal_dep.see("end")
+        self.journal_dep.configure(state="disabled")
+
+    def _controler_dependances(self) -> list:
+        etats = dep.tout_controler()
+        self.arbre_dep.delete(*self.arbre_dep.get_children())
+        for e in etats:
+            self.arbre_dep.insert("", "end", text=e.nom, tags=("ok" if e.present else "manque",),
+                                  values=(e.role, "OK" if e.present else "MANQUE", e.version, e.detail))
+        manquants = [e for e in etats if not e.present]
+        self.b_installer.configure(state="normal" if manquants else "disabled")
+        self.onglets.tab(self.page_dep, text="Dépendances" + (f" ({len(manquants)} ⚠)" if manquants else ""))
+        return manquants
+
+    def _controle_demarrage(self):
+        manquants = self._controler_dependances()
+        if not manquants:
+            return
+        self.onglets.select(self.page_dep)
+        noms = "\n".join(f"  • {e.nom} — {e.detail}" for e in manquants)
+        if messagebox.askyesno("Anonymiseur", "Éléments manquants :\n\n" + noms +
+                               "\n\nLes installer maintenant ? (connexion internet nécessaire)"):
+            self._installer(False)
+
+    def _installer(self, tout: bool):
+        if self.fil_dep and self.fil_dep.is_alive():
+            return
+        if self.fil and self.fil.is_alive():
+            messagebox.showwarning("Anonymiseur", "Attendez la fin de l'anonymisation en cours.")
+            return
+        paquets = list(dep.PAQUETS) if tout else dep.paquets_manquants()
+        for b in (self.b_controler, self.b_installer, self.b_maj):
+            b.configure(state="disabled")
+        self.fil_dep = threading.Thread(target=self._installer_fil, args=(paquets,), daemon=True)
+        self.fil_dep.start()
+
+    def _installer_fil(self, paquets):
+        msg = self.file_messages.put
+        ecrire = lambda t: msg(("dep_log", t))
+        ok = dep.installer(paquets, ecrire)
+        if ok and paquets:
+            ecrire("Installation terminée.")
+        elif not ok:
+            ecrire("ÉCHEC de l'installation : voir les messages de pip ci-dessus.")
+        if ok and not dep.controler_modeles()[1].present:
+            dep.telecharger_modele_plaques(ecrire)
+        msg(("dep_fin", ok))
+
+    def _modules_prets(self) -> bool:
+        if not self.modules_ok:
+            self.modules_ok = charger_modules()
+        if not self.modules_ok:
+            self.onglets.select(self.page_dep)
+            messagebox.showwarning("Anonymiseur", "Des dépendances manquent : installez-les depuis "
+                                   "l'onglet « Dépendances ».")
+        return self.modules_ok
 
     def _choisir_source(self):
         d = filedialog.askdirectory(title="Dossier des photos", initialdir=self.v_source.get() or None)
@@ -175,6 +290,8 @@ class Application(tk.Tk):
 
     # ------------------------------------------------------------ traitement
     def _lancer(self):
+        if not self._modules_prets():
+            return
         d = self._dossiers()
         if d is None:
             return
@@ -255,6 +372,19 @@ class Application(tk.Tk):
                     self._ecrire(val)
                 elif genre == "progres":
                     self.progres.configure(value=val)
+                elif genre == "dep_log":
+                    self._ecrire_dep(val)
+                elif genre == "dep_fin":
+                    self.b_controler.configure(state="normal")
+                    self.b_maj.configure(state="normal")
+                    manquants = self._controler_dependances()
+                    self.modules_ok = charger_modules()
+                    if not manquants:
+                        messagebox.showinfo("Anonymiseur", "Toutes les dépendances sont installées.")
+                    elif val:
+                        messagebox.showwarning("Anonymiseur", "Installation faite, mais des éléments restent "
+                                               "en défaut. Si un paquet était déjà chargé, fermez et "
+                                               "relancez le programme.")
                 elif genre == "fin":
                     self.b_lancer.configure(state="normal")
                     self.b_verifier.configure(state="normal")
@@ -264,6 +394,8 @@ class Application(tk.Tk):
         self.after(100, self._lire_messages)
 
     def _verifier(self):
+        if not self._modules_prets():
+            return
         d = self._dossiers()
         if d is None:
             return
