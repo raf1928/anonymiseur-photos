@@ -24,13 +24,27 @@ Au premier usage, le modèle de détection des plaques (≈ 27 Mo) est télécha
    sous-dossiers, suppression des métadonnées.
 3. **Anonymiser**. Les originaux ne sont **jamais modifiés**.
 4. **Vérifier / corriger…** : contrôle photo par photo.
-   - glisser avec le clic gauche : ajouter une zone à flouter (vert) ;
+   - clic : flouter un carré (taille à la molette) ; glisser : ajouter un rectangle (vert) ;
    - clic droit sur une zone : l'écarter (fausse détection) ou la réactiver ; une zone ajoutée est supprimée ;
    - flèches ← → : photo précédente / suivante ;
    - les photos sans aucune zone floutée apparaissent en orange dans la liste.
 
    Chaque correction réécrit aussitôt la photo anonymisée. Les corrections sont mémorisées dans
    `anonymisé\zones_anonymisation.json` et conservées si l'on relance l'anonymisation.
+
+### Mode manuel
+
+Bouton **Mode manuel…** : toutes les photos du dossier défilent, sans détection automatique préalable.
+
+- flèches **← →** : photo précédente / suivante ;
+- **clic** sur l'image : floute un carré centré sur le clic (cadre jaune en pointillés = taille) ;
+- **molette** sur l'image : agrandit / réduit ce carré ;
+- glisser : floute le rectangle tracé ; clic droit sur une zone : la retirer ; **Ctrl+Z** : annuler le dernier ajout ;
+- la photo est **enregistrée dès qu'on passe à une autre** (ou qu'on ferme la fenêtre), même sans zone :
+  on obtient alors une copie sans métadonnées. Les photos enregistrées portent ✓ dans la liste,
+  les autres sont en orange.
+
+Les deux modes partagent les mêmes zones : on peut lancer l'automatique puis compléter en manuel.
 
 ## Fonctionnement
 

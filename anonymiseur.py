@@ -138,6 +138,8 @@ class Application(tk.Tk):
         self.b_arreter.pack(side="left", padx=4)
         self.b_verifier = ttk.Button(bas, text="Vérifier / corriger…", command=self._verifier)
         self.b_verifier.pack(side="left", padx=4)
+        self.b_manuel = ttk.Button(bas, text="Mode manuel…", command=self._mode_manuel)
+        self.b_manuel.pack(side="left", padx=4)
         ttk.Button(bas, text="Ouvrir la sortie", command=self._ouvrir_sortie).pack(side="left", padx=4)
 
         self.progres = ttk.Progressbar(page, mode="determinate")
@@ -308,6 +310,7 @@ class Application(tk.Tk):
         self.arreter.clear()
         self.b_lancer.configure(state="disabled")
         self.b_verifier.configure(state="disabled")
+        self.b_manuel.configure(state="disabled")
         self.b_arreter.configure(state="normal")
         self.progres.configure(maximum=len(photos), value=0)
         self._ecrire(f"{len(photos)} photo(s) à traiter → {sortie}")
@@ -388,6 +391,7 @@ class Application(tk.Tk):
                 elif genre == "fin":
                     self.b_lancer.configure(state="normal")
                     self.b_verifier.configure(state="normal")
+                    self.b_manuel.configure(state="normal")
                     self.b_arreter.configure(state="disabled")
         except queue.Empty:
             pass
@@ -408,6 +412,24 @@ class Application(tk.Tk):
         self._memoriser()
         FenetreVerification(self, src, sortie, zones, self.reglages())
 
+    def _mode_manuel(self):
+        if not self._modules_prets():
+            return
+        if self.fil and self.fil.is_alive():
+            messagebox.showwarning("Anonymiseur", "Attendez la fin de l'anonymisation en cours.")
+            return
+        d = self._dossiers()
+        if d is None:
+            return
+        src, sortie = d
+        photos = an.lister_photos(src, self.v_sous_dossiers.get(), exclure=sortie)
+        if not photos:
+            messagebox.showinfo("Anonymiseur", "Aucune photo JPG dans ce dossier.")
+            return
+        self._memoriser()
+        FenetreVerification(self, src, sortie, an.charger_zones(sortie), self.reglages(),
+                            manuel=True, photos=photos)
+
     def _fermer(self):
         self._memoriser()
         self.arreter.set()
@@ -425,23 +447,37 @@ def _meme_zone(a: an.Zone, b: an.Zone) -> bool:
 class FenetreVerification(tk.Toplevel):
     """Contrôle photo par photo.
 
-    Clic gauche + glisser : ajouter une zone à flouter.
+    Clic gauche : flouter un carré centré sur le clic (taille : molette).
+    Clic gauche + glisser : flouter le rectangle tracé.
     Clic droit sur une zone : l'écarter (faux positif) ou la réactiver ;
-    une zone ajoutée à la main est supprimée.
-    Chaque modification réécrit aussitôt la photo anonymisée.
+    une zone ajoutée à la main est supprimée. Ctrl+Z : annuler le dernier ajout.
+
+    Mode vérification : photos déjà traitées, chaque modification est écrite aussitôt.
+    Mode manuel (`manuel=True`) : toutes les photos du dossier, défilement aux
+    flèches ; la photo est enregistrée dès qu'on passe à une autre (ou qu'on ferme).
     """
 
-    def __init__(self, maitre: Application, src: Path, sortie: Path, zones: dict, reglages: an.Reglages):
+    def __init__(self, maitre: Application, src: Path, sortie: Path, zones: dict, reglages: an.Reglages,
+                 manuel: bool = False, photos: list[Path] | None = None):
         super().__init__(maitre)
-        self.title("Vérifier / corriger l'anonymisation")
+        self.manuel = manuel
+        self.title("Mode manuel — flouter au clic" if manuel else "Vérifier / corriger l'anonymisation")
         self.geometry("1200x800")
         self.src, self.sortie, self.zones, self.reg = src, sortie, zones, reglages
-        self.cles = sorted(k for k in zones if (src / k).exists())
+        if manuel:
+            self.cles = [p.relative_to(src).as_posix() for p in photos or []]
+            for k in self.cles:
+                self.zones.setdefault(k, [])
+        else:
+            self.cles = sorted(k for k in zones if (src / k).exists())
         self.indice = 0
         self.bgr = self.pil = None
         self.echelle = 1.0
         self.debut = None
-        self.v_apercu = tk.BooleanVar(value=False)
+        self.modifie = False
+        self.taille = 0.10          # côté du carré flouté au clic, fraction du petit côté de la photo
+        self.souris = None
+        self.v_apercu = tk.BooleanVar(value=manuel)
 
         gauche = ttk.Frame(self)
         gauche.pack(side="left", fill="y")
@@ -460,50 +496,88 @@ class FenetreVerification(tk.Toplevel):
         ttk.Button(haut, text="Suivante ▶", command=lambda: self._aller(1)).pack(side="left", padx=4)
         ttk.Checkbutton(haut, text="Voir le résultat flouté", variable=self.v_apercu,
                         command=self._afficher).pack(side="left", padx=12)
-        ttk.Label(haut, text="Glisser = ajouter une zone · clic droit = écarter / réactiver",
+        ttk.Label(haut, text="Clic = flouter · glisser = rectangle · molette = taille · "
+                             "clic droit = retirer · Ctrl+Z = annuler · ← → = photo",
                   foreground="gray").pack(side="left", padx=8)
         self.info = ttk.Label(droite, text="")
         self.info.pack(fill="x", padx=4)
-        self.canevas = tk.Canvas(droite, background="#202020", highlightthickness=0)
+        self.canevas = tk.Canvas(droite, background="#202020", highlightthickness=0, cursor="crosshair")
         self.canevas.pack(fill="both", expand=True)
         self.canevas.bind("<Configure>", lambda e: self._afficher())
         self.canevas.bind("<ButtonPress-1>", self._presser)
         self.canevas.bind("<B1-Motion>", self._glisser)
         self.canevas.bind("<ButtonRelease-1>", self._relacher)
         self.canevas.bind("<Button-3>", self._clic_droit)
+        self.canevas.bind("<Motion>", self._bouger)
+        self.canevas.bind("<Leave>", self._sortir)
+        self.bind("<MouseWheel>", self._molette)
         self.bind("<Left>", lambda e: self._aller(-1))
         self.bind("<Right>", lambda e: self._aller(1))
+        self.bind("<Control-z>", lambda e: self._annuler())
+        self.protocol("WM_DELETE_WINDOW", self._fermer)
 
         self._remplir_liste()
         if self.cles:
             self.liste.selection_set(0)
             self._charger()
+        self.focus_force()
 
     def _libelle(self, cle):
         zs = [z for z in self.zones[cle] if z.actif]
-        return f"{cle}  ({len(zs)})"
+        fait = " ✓" if self.manuel and an.chemin_sortie(self.src / cle, self.src, self.sortie).exists() else ""
+        return f"{cle}  ({len(zs)}){fait}"
 
     def _remplir_liste(self):
         self.liste.delete(0, "end")
-        for k in self.cles:
+        for i, k in enumerate(self.cles):
             self.liste.insert("end", self._libelle(k))
-            if not any(z.actif for z in self.zones[k]):
-                self.liste.itemconfigure("end", foreground="#c07000")   # rien flouté : à regarder
+            self._colorer(i)
+
+    def _colorer(self, i):
+        # vérification : rien flouté = à regarder ; manuel : pas encore enregistrée
+        if self.manuel:
+            fait = an.chemin_sortie(self.src / self.cles[i], self.src, self.sortie).exists()
+            self.liste.itemconfigure(i, foreground="" if fait else "#c07000")
+        elif not any(z.actif for z in self.zones[self.cles[i]]):
+            self.liste.itemconfigure(i, foreground="#c07000")
+
+    def _maj_ligne(self, i):
+        self.liste.delete(i)
+        self.liste.insert(i, self._libelle(self.cles[i]))
+        self._colorer(i)
 
     def _choisir(self):
         sel = self.liste.curselection()
         if sel and sel[0] != self.indice:
-            self.indice = sel[0]
-            self._charger()
+            self._aller_a(sel[0])
 
     def _aller(self, pas):
-        if not self.cles:
-            return
-        self.indice = max(0, min(len(self.cles) - 1, self.indice + pas))
+        if self.cles:
+            self._aller_a(max(0, min(len(self.cles) - 1, self.indice + pas)))
+
+    def _aller_a(self, i):
+        if i != self.indice:
+            self._quitter_photo()
+            self.indice = i
+            self._charger()
         self.liste.selection_clear(0, "end")
         self.liste.selection_set(self.indice)
         self.liste.see(self.indice)
-        self._charger()
+
+    def _quitter_photo(self):
+        """Mode manuel : enregistrement immédiat en quittant la photo."""
+        if not self.manuel or self.bgr is None:
+            return
+        cle = self.cles[self.indice]
+        if self.modifie or not an.chemin_sortie(self.src / cle, self.src, self.sortie).exists():
+            self._ecrire_photo()
+        self.modifie = False
+
+    def _fermer(self):
+        try:
+            self._quitter_photo()
+        finally:
+            self.destroy()
 
     def _charger(self):
         cle = self.cles[self.indice]
@@ -533,15 +607,48 @@ class FenetreVerification(tk.Toplevel):
         npl = sum(z.type == "plaque" and z.actif for z in zones)
         nm = sum(z.type == "manuel" for z in zones)
         nx = sum(not z.actif for z in zones)
+        etat = ""
+        if self.manuel:
+            etat = (" — modifiée, enregistrée en changeant de photo" if self.modifie else
+                    " — enregistrée" if an.chemin_sortie(self.src / cle, self.src, self.sortie).exists() else "")
         self.info.configure(text=f"{self.indice + 1}/{len(self.cles)} — {cle} : {nv} visage(s) (rouge), "
-                                 f"{npl} plaque(s) (bleu), {nm} ajoutée(s) (vert), {nx} écartée(s) (pointillés)")
+                                 f"{npl} plaque(s) (bleu), {nm} ajoutée(s) (vert), {nx} écartée(s) (pointillés)"
+                                 f" · pinceau {self.taille:.0%}{etat}")
+        self._dessiner_pinceau()
 
     def _vers_image(self, ev):
         return int(ev.x / self.echelle), int(ev.y / self.echelle)
 
+    def _cote_pinceau(self) -> int:
+        """Côté du carré flouté au clic, en pixels de la photo."""
+        return max(8, int(min(self.bgr.shape[:2]) * self.taille))
+
+    def _dessiner_pinceau(self):
+        self.canevas.delete("pinceau")
+        if self.souris is None or self.bgr is None or self.debut is not None:
+            return
+        x, y = self.souris
+        r = self._cote_pinceau() * self.echelle / 2
+        self.canevas.create_rectangle(x - r, y - r, x + r, y + r, outline="#ffff40", dash=(3, 3), tags="pinceau")
+
+    def _bouger(self, ev):
+        self.souris = (ev.x, ev.y)
+        self._dessiner_pinceau()
+
+    def _sortir(self, ev):
+        self.souris = None
+        self.canevas.delete("pinceau")
+
+    def _molette(self, ev):
+        if self.souris is None:
+            return   # souris hors de l'image (sur la liste : défilement normal)
+        self.taille = min(0.6, max(0.02, self.taille * (1.15 if ev.delta > 0 else 1 / 1.15)))
+        self._afficher()
+
     def _presser(self, ev):
         self.debut = (ev.x, ev.y)
         self.canevas.delete("trace")
+        self.canevas.delete("pinceau")
 
     def _glisser(self, ev):
         if self.debut:
@@ -549,20 +656,36 @@ class FenetreVerification(tk.Toplevel):
             self.canevas.create_rectangle(*self.debut, ev.x, ev.y, outline=COULEURS["manuel"], width=2, tags="trace")
 
     def _relacher(self, ev):
-        if not self.debut:
+        if not self.debut or self.bgr is None:
             return
         x0, y0 = self.debut
         self.debut = None
         self.canevas.delete("trace")
-        if abs(ev.x - x0) < 4 or abs(ev.y - y0) < 4:
-            return
         h, w = self.bgr.shape[:2]
         e = self.echelle
-        x1, x2 = sorted((int(x0 / e), int(ev.x / e)))
-        y1, y2 = sorted((int(y0 / e), int(ev.y / e)))
+        if abs(ev.x - x0) < 4 and abs(ev.y - y0) < 4:
+            # simple clic : carré centré sur le point cliqué
+            cx, cy = self._vers_image(ev)
+            if not (0 <= cx < w and 0 <= cy < h):
+                return
+            r = self._cote_pinceau() // 2
+            x1, y1, x2, y2 = cx - r, cy - r, cx + r, cy + r
+        elif abs(ev.x - x0) < 4 or abs(ev.y - y0) < 4:
+            return   # rectangle trop plat : geste involontaire
+        else:
+            x1, x2 = sorted((int(x0 / e), int(ev.x / e)))
+            y1, y2 = sorted((int(y0 / e), int(ev.y / e)))
         self.zones[self.cles[self.indice]].append(
             an.Zone(max(0, x1), max(0, y1), min(w, x2), min(h, y2), "manuel"))
         self._sauver()
+
+    def _annuler(self):
+        zones = self.zones[self.cles[self.indice]] if self.cles else []
+        for z in reversed(zones):
+            if z.type == "manuel":
+                zones.remove(z)
+                self._sauver()
+                return
 
     def _clic_droit(self, ev):
         x, y = self._vers_image(ev)
@@ -578,14 +701,24 @@ class FenetreVerification(tk.Toplevel):
         self._sauver()
 
     def _sauver(self):
+        """Après une modification : écriture aussitôt (vérification) ou au changement de photo (manuel)."""
+        if self.manuel:
+            self.modifie = True
+        else:
+            self._ecrire_photo()
+        self._maj_ligne(self.indice)
+        self.liste.selection_set(self.indice)
+        self._afficher()
+
+    def _ecrire_photo(self):
         cle = self.cles[self.indice]
         an.ecrire_image(an.flouter(self.bgr, self.zones[cle], self.reg), self.pil,
                         an.chemin_sortie(self.src / cle, self.src, self.sortie), self.reg)
-        an.enregistrer_zones(self.sortie, self.src, self.zones)
-        self.liste.delete(self.indice)
-        self.liste.insert(self.indice, self._libelle(cle))
-        self.liste.selection_set(self.indice)
-        self._afficher()
+        # on ne mémorise que les photos qui ont un fichier de sortie
+        a_garder = {k: v for k, v in self.zones.items()
+                    if v or an.chemin_sortie(self.src / k, self.src, self.sortie).exists()}
+        an.enregistrer_zones(self.sortie, self.src, a_garder)
+        self._maj_ligne(self.indice)
 
 
 if __name__ == "__main__":
