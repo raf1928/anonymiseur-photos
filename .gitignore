@@ -1,0 +1,12 @@
+# Aucune photo sur GitHub (originaux comme anonymisées)
+*.jpg
+*.jpeg
+*.JPG
+*.JPEG
+*.png
+*.heic
+anonymisé/
+zones_anonymisation.json
+__pycache__/
+*.pyc
+*.tmp
