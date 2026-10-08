@@ -51,6 +51,7 @@ class Reglages:
     marge: float = 0.20          # agrandissement des zones (fraction de la taille)
     supprimer_metadonnees: bool = True
     qualite_jpeg: int = 92
+    copier_sans_zone: bool = True   # enregistrer aussi les photos où rien n'est flouté
 
 
 # --------------------------------------------------------------------------- #
