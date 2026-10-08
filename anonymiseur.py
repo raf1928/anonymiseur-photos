@@ -142,8 +142,12 @@ class Application(tk.Tk):
         self.b_manuel.pack(side="left", padx=4)
         ttk.Button(bas, text="Ouvrir la sortie", command=self._ouvrir_sortie).pack(side="left", padx=4)
 
-        self.progres = ttk.Progressbar(page, mode="determinate")
-        self.progres.pack(fill="x", **pad)
+        ligne = ttk.Frame(page)
+        ligne.pack(fill="x", **pad)
+        self.compteur = ttk.Label(ligne, text="", width=14, anchor="e")
+        self.compteur.pack(side="right", padx=(8, 0))
+        self.progres = ttk.Progressbar(ligne, mode="determinate")
+        self.progres.pack(side="left", fill="x", expand=True)
         self.journal = tk.Text(page, height=12, wrap="word", state="disabled")
         self.journal.pack(fill="both", expand=True, **pad)
 
@@ -313,6 +317,7 @@ class Application(tk.Tk):
         self.b_manuel.configure(state="disabled")
         self.b_arreter.configure(state="normal")
         self.progres.configure(maximum=len(photos), value=0)
+        self.compteur.configure(text=f"0 / {len(photos)}")
         self._ecrire(f"{len(photos)} photo(s) à traiter → {sortie}")
         self.fil = threading.Thread(target=self._traiter, args=(photos, src, sortie, reg, self.v_deja.get()),
                                     daemon=True)
@@ -375,6 +380,7 @@ class Application(tk.Tk):
                     self._ecrire(val)
                 elif genre == "progres":
                     self.progres.configure(value=val)
+                    self.compteur.configure(text=f"{val} / {int(self.progres.cget('maximum'))}")
                 elif genre == "dep_log":
                     self._ecrire_dep(val)
                 elif genre == "dep_fin":
@@ -475,6 +481,7 @@ class FenetreVerification(tk.Toplevel):
         self.echelle = 1.0
         self.debut = None
         self.modifie = False
+        self.faites: set | None = None
         self.taille = 0.10          # côté du carré flouté au clic, fraction du petit côté de la photo
         self.souris = None
         self.v_apercu = tk.BooleanVar(value=manuel)
@@ -501,6 +508,13 @@ class FenetreVerification(tk.Toplevel):
                   foreground="gray").pack(side="left", padx=8)
         self.info = ttk.Label(droite, text="")
         self.info.pack(fill="x", padx=4)
+        if manuel:
+            ligne = ttk.Frame(droite)
+            ligne.pack(fill="x", padx=4, pady=2)
+            self.compteur = ttk.Label(ligne, text="", anchor="e")
+            self.compteur.pack(side="right", padx=(8, 0))
+            self.progres = ttk.Progressbar(ligne, mode="determinate", maximum=max(1, len(self.cles)))
+            self.progres.pack(side="left", fill="x", expand=True)
         self.canevas = tk.Canvas(droite, background="#202020", highlightthickness=0, cursor="crosshair")
         self.canevas.pack(fill="both", expand=True)
         self.canevas.bind("<Configure>", lambda e: self._afficher())
@@ -517,6 +531,7 @@ class FenetreVerification(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self._fermer)
 
         self._remplir_liste()
+        self._maj_avancement()
         if self.cles:
             self.liste.selection_set(0)
             self._charger()
@@ -540,6 +555,15 @@ class FenetreVerification(tk.Toplevel):
             self.liste.itemconfigure(i, foreground="" if fait else "#c07000")
         elif not any(z.actif for z in self.zones[self.cles[i]]):
             self.liste.itemconfigure(i, foreground="#c07000")
+
+    def _maj_avancement(self):
+        if not self.manuel:
+            return
+        if self.faites is None:   # un seul parcours du disque, ensuite tenu à jour à l'écriture
+            self.faites = {k for k in self.cles if an.chemin_sortie(self.src / k, self.src, self.sortie).exists()}
+        faites = len(self.faites)
+        self.progres.configure(value=faites)
+        self.compteur.configure(text=f"{faites} / {len(self.cles)} enregistrées")
 
     def _maj_ligne(self, i):
         self.liste.delete(i)
@@ -718,6 +742,9 @@ class FenetreVerification(tk.Toplevel):
         a_garder = {k: v for k, v in self.zones.items()
                     if v or an.chemin_sortie(self.src / k, self.src, self.sortie).exists()}
         an.enregistrer_zones(self.sortie, self.src, a_garder)
+        if self.faites is not None:
+            self.faites.add(cle)
+        self._maj_avancement()
         self._maj_ligne(self.indice)
 
 
