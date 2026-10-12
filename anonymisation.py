@@ -113,6 +113,7 @@ def _nms(zones: list[Zone], seuil_iou: float = 0.4) -> list[Zone]:
 class Detecteur:
     def __init__(self, reglages: Reglages):
         self.reglages = reglages
+        desactiver_bridage_windows()
         self._visage = None
         self._plaque = None
 
@@ -268,3 +269,66 @@ def enregistrer_zones(dossier_sortie: Path, source: Path, zones: dict[str, list[
 
 def chemin_sortie(photo: Path, source: Path, dossier_sortie: Path) -> Path:
     return dossier_sortie / photo.relative_to(source)
+
+
+def zones_reduites(zones: list[Zone], facteur: float) -> list[Zone]:
+    """Zones ramenées à l'échelle d'une image réduite (aperçus)."""
+    return [Zone(int(z.x1 * facteur), int(z.y1 * facteur), int(z.x2 * facteur), int(z.y2 * facteur),
+                 z.type, z.score, z.actif) for z in zones]
+
+
+def reduire(bgr: np.ndarray, cote_max: int) -> tuple[np.ndarray, float]:
+    """Image réduite (plus grand côté <= cote_max) et facteur d'échelle appliqué."""
+    h, w = bgr.shape[:2]
+    f = min(1.0, cote_max / max(h, w))
+    if f >= 1.0:
+        return bgr, 1.0
+    return cv2.resize(bgr, (int(w * f), int(h * f)), interpolation=cv2.INTER_AREA), f
+
+
+def effacer_sortie(dossier_sortie: Path) -> int:
+    """Efface les résultats d'une exécution précédente : JPG et fichier des zones
+    (les autres fichiers éventuels sont laissés). Renvoie le nombre de JPG effacés."""
+    dossier_sortie = Path(dossier_sortie)
+    if not dossier_sortie.is_dir():
+        return 0
+    n = 0
+    for p in list(dossier_sortie.rglob("*")):
+        if p.is_file() and (p.suffix.lower() in EXTENSIONS or p.name == FICHIER_ZONES):
+            p.unlink()
+            n += p.suffix.lower() in EXTENSIONS
+    # sous-dossiers devenus vides (le dossier de sortie lui-même est gardé)
+    for d in sorted((d for d in dossier_sortie.rglob("*") if d.is_dir()), key=lambda d: len(d.parts), reverse=True):
+        try:
+            d.rmdir()
+        except OSError:
+            pass
+    return n
+
+
+def desactiver_bridage_windows() -> bool:
+    """Exclut le processus du mode « efficacité » de Windows 11 (EcoQoS).
+
+    Sans cela, dès que la fenêtre n'est plus au premier plan, Windows bride le
+    calcul (mesuré sur i9-13900 : 0,035 s → 0,35 s par passage du modèle des
+    plaques, soit 8 s au lieu de 1,5 s par photo). Ne concerne que ce programme.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _Etat(ctypes.Structure):
+            _fields_ = [("Version", wintypes.ULONG), ("ControlMask", wintypes.ULONG),
+                        ("StateMask", wintypes.ULONG)]
+
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        k.GetCurrentProcess.restype = wintypes.HANDLE
+        k.SetProcessInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        k.SetProcessInformation.restype = wintypes.BOOL
+        etat = _Etat(1, 0x1, 0x0)   # PROCESS_POWER_THROTTLING_EXECUTION_SPEED : désactivé
+        return bool(k.SetProcessInformation(k.GetCurrentProcess(), 4,   # ProcessPowerThrottling
+                                            ctypes.byref(etat), ctypes.sizeof(etat)))
+    except Exception:
+        return False

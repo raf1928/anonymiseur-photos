@@ -3,8 +3,10 @@
 Lancement : python anonymiseur.py
 
 Floute les visages et les plaques d'immatriculation des JPG d'un dossier.
-Les originaux ne sont jamais modifiés : les photos anonymisées sont écrites
-dans un dossier de sortie (par défaut « <dossier>/anonymisé »).
+Une seule fenêtre : photo d'origine à gauche, résultat à droite, en mode
+automatique comme en mode manuel. Les originaux ne sont jamais modifiés ; à la
+fin d'une exécution, le dossier de sortie (par défaut « <dossier>/anonymisé »)
+est vidé puis reçoit toutes les photos et le fichier des zones.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 import dependances as dep
+import onedrive
 
 # Chargés par charger_modules() : absents tant que les dépendances ne sont pas
 # installées, et l'onglet « Dépendances » doit pouvoir s'afficher quand même.
@@ -120,16 +123,14 @@ def texte_aide(parent, texte: str):
 
 
 AIDE_PRINCIPALE = (
-    "Ce programme floute automatiquement les visages et les plaques d'immatriculation des photos JPG d'un "
-    "dossier. Les originaux ne sont jamais modifiés. Le dossier de sortie reçoit TOUTES les photos en JPG "
-    "(floutées quand il y a un visage ou une plaque, sinon simplement recopiées et compressées selon la "
-    "qualité choisie) ainsi que le fichier zones_anonymisation.json qui mémorise les zones floutées.\n"
-    "1) Choisissez le dossier des photos.  2) Réglez les options.  3) Cliquez sur « Anonymiser » : l'aperçu "
-    "à droite montre le résultat de chaque photo pendant le traitement ; les photos ne sont copiées dans la "
-    "sortie qu'à la fin (si vous arrêtez, rien n'est copié sauf si vous le demandez). Contrôlez ensuite avec "
-    "« Vérifier / corriger… ». Ou bien utilisez « Mode manuel… » pour flouter vous-même au clic.\n"
-    "Tout est traité sur cet ordinateur : aucune photo n'est envoyée sur internet. "
-    "Survolez un bouton ou un réglage pour afficher son aide.")
+    "Floute les visages et les plaques d'immatriculation des photos JPG d'un dossier. Les originaux ne sont "
+    "jamais modifiés. À la fin d'une exécution, le dossier de sortie est vidé de l'exécution précédente puis "
+    "reçoit TOUTES les photos en JPG (floutées, ou simplement recopiées et compressées) et le fichier "
+    "zones_anonymisation.json. Si vous arrêtez ou abandonnez, rien n'est copié sauf si vous le demandez.\n"
+    "« Anonymiser » : détection automatique, chaque photo s'affiche à gauche telle quelle et à droite floutée.  "
+    "« Mode manuel » : vous floutez vous-même au clic (les zones d'une exécution précédente sont reprises).  "
+    "Le point à côté du dossier : rouge = photos pas encore téléchargées de OneDrive, vert = toutes disponibles. "
+    "Survolez un bouton ou un réglage pour son aide.")
 
 AIDE_DEPENDANCES = (
     "Le programme a besoin de bibliothèques Python et de deux modèles de détection. Le tableau indique ce "
@@ -137,33 +138,99 @@ AIDE_DEPENDANCES = (
     "propose de l'installer. L'installation utilise pip, nécessite une connexion internet et se fait dans "
     "le Python indiqué ci-dessous. Le modèle des plaques (≈ 27 Mo) n'est téléchargé qu'une fois.")
 
-AIDE_VERIFICATION = (
-    "Contrôle des photos anonymisées. Cadres rouges = visages détectés, bleus = plaques, verts = zones "
-    "ajoutées à la main, pointillés = zones écartées (non floutées).\n"
-    "Clic sur l'image : flouter un carré (cadre jaune, taille réglable à la molette).  Glisser : flouter un "
-    "rectangle.  Clic droit sur une zone : l'écarter ou la réactiver (une zone ajoutée est supprimée).  "
-    "Ctrl+Z : annuler le dernier ajout.  ← → : photo précédente / suivante.\n"
-    "Chaque modification est enregistrée aussitôt. En orange dans la liste : photos où rien n'est flouté, "
-    "à regarder en priorité.")
+AIDE_AUTO = ("Traitement automatique : à gauche la photo d'origine avec les zones détectées (rouge = visage, "
+             "bleu = plaque, vert = ajoutée à la main), à droite le résultat qui sera enregistré.")
 
-AIDE_MANUEL = (
-    "Mode manuel : toutes les photos du dossier défilent avec les flèches ← →. L'image montre le résultat tel "
-    "qu'il sera enregistré.\n"
-    "Clic sur l'image : flouter un carré centré sur le clic (cadre jaune, taille réglable à la molette).  "
-    "Glisser : flouter un rectangle.  Clic droit sur une zone : la retirer.  Ctrl+Z : annuler le dernier "
-    "ajout.\n"
-    "Rien n'est écrit pendant le défilement : tout est enregistré à la fin, avec « Terminer et enregistrer » "
-    "(toutes les photos du dossier sont alors copiées dans la sortie, floutées ou non). « Abandonner » ou la "
-    "fermeture de la fenêtre ne copient rien sans votre accord. ✓ = photo vue, orange = pas encore vue, "
-    "* = modifiée.")
+AIDE_MANUEL = ("Mode manuel — clic : flouter un carré (cadre jaune) · glisser : flouter un rectangle · "
+               "↑ / ↓ ou molette : agrandir / réduire le carré · clic droit sur une zone : la retirer · "
+               "Ctrl+Z : annuler · ← / → : photo précédente / suivante. Rien n'est écrit avant "
+               "« Terminer et enregistrer ».")
+
+BANDEAU_MANUEL = "Cliquez sur la zone à flouter"
+COTE_APERCU = 1600          # côté maximal des images affichées (calculs d'aperçu rapides)
+
+
+class VuePhoto(tk.Canvas):
+    """Affiche une image réduite (PIL) ajustée au cadre, avec les zones éventuelles.
+
+    `facteur` = taille de l'image affichée / taille de la photo d'origine : il sert à
+    convertir les clics en coordonnées de la photo d'origine.
+    """
+
+    def __init__(self, parent, **kw):
+        super().__init__(parent, background="#202020", highlightthickness=0, **kw)
+        self.image = None
+        self.zones = []
+        self.facteur = 1.0
+        self.echelle = 1.0     # image réduite → écran
+        self.dx = self.dy = 0
+        self._tk = None
+        self.bind("<Configure>", lambda e: self.redessiner())
+
+    def montrer(self, image, facteur: float, zones=None):
+        self.image, self.facteur, self.zones = image, facteur, zones or []
+        self.redessiner()
+
+    def vider(self, texte: str = ""):
+        self.image = None
+        self.delete("all")
+        if texte:
+            self.create_text(self.winfo_width() // 2, self.winfo_height() // 2, text=texte, fill="#a0a0a0",
+                             justify="center")
+
+    def redessiner(self):
+        if self.image is None:
+            return
+        cw, ch = max(20, self.winfo_width()), max(20, self.winfo_height())
+        w, h = self.image.size
+        self.echelle = min(cw / w, ch / h)
+        aff = self.image.resize((max(1, int(w * self.echelle)), max(1, int(h * self.echelle))))
+        self.dx, self.dy = (cw - aff.width) // 2, (ch - aff.height) // 2
+        self._tk = ImageTk.PhotoImage(aff)
+        self.delete("all")
+        self.create_image(self.dx, self.dy, anchor="nw", image=self._tk)
+        e = self.echelle * self.facteur
+        for z in self.zones:
+            self.create_rectangle(self.dx + z.x1 * e, self.dy + z.y1 * e, self.dx + z.x2 * e, self.dy + z.y2 * e,
+                                  outline=COULEURS.get(z.type, "#ffffff"), width=2,
+                                  dash=() if z.actif else (4, 4), tags="zone")
+
+    def vers_photo(self, x, y) -> tuple[float, float]:
+        """Coordonnées écran → coordonnées dans la photo d'origine."""
+        e = self.echelle * self.facteur
+        return (x - self.dx) / e, (y - self.dy) / e
+
+    def vers_ecran(self, x, y) -> tuple[float, float]:
+        e = self.echelle * self.facteur
+        return self.dx + x * e, self.dy + y * e
+
+
+class ModeManuel:
+    """État du mode manuel (photos, zones, position)."""
+
+    def __init__(self, src: Path, sortie: Path, photos: list[Path], zones: dict):
+        self.src, self.sortie = src, sortie
+        self.cles = [p.relative_to(src).as_posix() for p in photos]
+        self.zones = {k: list(zones.get(k, [])) for k in self.cles}
+        self.indice = -1
+        self.vues: set[str] = set()
+        self.modifiees: set[str] = set()
+        self.bgr = None          # photo courante pleine résolution
+        self.petite = None       # photo courante réduite (affichage)
+        self.facteur = 1.0
+        self.taille = 0.10       # côté du carré flouté au clic, fraction du petit côté de la photo
+
+    @property
+    def cle(self):
+        return self.cles[self.indice]
 
 
 class Application(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Anonymiseur de photos — visages et plaques")
-        self.geometry("1400x820")
-        self.minsize(1100, 600)
+        self.geometry("1500x940")
+        self.minsize(1150, 700)
         r = lire_reglages()
 
         self.v_source = tk.StringVar(value=r.get("source", ""))
@@ -175,7 +242,6 @@ class Application(tk.Tk):
         self.v_force = tk.IntVar(value=r.get("force", 3))
         self.v_sensibilite = tk.IntVar(value=r.get("sensibilite", 3))
         self.v_metadonnees = tk.BooleanVar(value=r.get("supprimer_metadonnees", True))
-        self.v_deja = tk.BooleanVar(value=r.get("ignorer_deja_faites", False))
         self.v_qualite = tk.IntVar(value=r.get("qualite_jpeg", 92))
 
         self.file_messages: queue.Queue = queue.Queue()
@@ -183,9 +249,15 @@ class Application(tk.Tk):
         self.fil_dep: threading.Thread | None = None
         self.arreter = threading.Event()
         self.abandon = False             # fermeture pendant un traitement : rien n'est copié
-        self._apercu_pil = None
-        self._apercu_tk = None
+        self.manuel: ModeManuel | None = None
+        self.debut = None                # début d'un glisser (vue, x, y)
+        self.souris = None               # (vue, x, y) survolée
+        self.chargeur = None             # téléchargement OneDrive en cours
+        self.photos_source: list = []
         self.modules_ok = charger_modules()
+        if self.modules_ok:
+            an.desactiver_bridage_windows()
+
         self.onglets = ttk.Notebook(self)
         self.onglets.pack(fill="both", expand=True)
         self.page_anon = ttk.Frame(self.onglets)
@@ -194,115 +266,160 @@ class Application(tk.Tk):
         self.onglets.add(self.page_dep, text="Dépendances")
         self._construire(self.page_anon)
         self._construire_dependances(self.page_dep)
+        self._raccourcis()
         self.protocol("WM_DELETE_WINDOW", self._fermer)
         self.after(100, self._lire_messages)
         self.after(300, self._controle_demarrage)
+        self.after(500, self._source_changee)
         self.after(2000, _nettoyer_preparations)
 
     # ------------------------------------------------------------------ UI
     def _construire(self, page):
-        pad = {"padx": 8, "pady": 4}
-        gauche = ttk.Frame(page)
-        gauche.pack(side="left", fill="both")
-        droite = ttk.LabelFrame(page, text="Aperçu du résultat")
-        droite.pack(side="left", fill="both", expand=True, padx=(0, 8), pady=8)
-        self.apercu = bulle(tk.Label(droite, background="#202020", foreground="#c0c0c0",
-                                     text="Le résultat de chaque photo\ns'affiche ici pendant le traitement."),
-                            "Résultat de la photo en cours de traitement, tel qu'il sera enregistré dans la sortie.")
-        self.apercu.pack(fill="both", expand=True, padx=4, pady=4)
-        self.apercu.bind("<Configure>", lambda e: self._dessiner_apercu())
-        self.apercu_titre = ttk.Label(droite, text="")
-        self.apercu_titre.pack(fill="x", padx=4, pady=(0, 4))
-        page = gauche
-        texte_aide(page, AIDE_PRINCIPALE).pack(fill="x", padx=10, pady=(8, 2))
-        cadre = ttk.LabelFrame(page, text="Dossiers")
-        cadre.pack(fill="x", **pad)
+        pad = {"padx": 6, "pady": 3}
+        texte_aide(page, AIDE_PRINCIPALE).pack(fill="x", padx=10, pady=(6, 2))
+
+        haut = ttk.Frame(page)
+        haut.pack(fill="x", padx=4)
+        cadre = ttk.LabelFrame(haut, text="Dossiers")
+        cadre.pack(side="left", fill="both", expand=True, padx=4, pady=2)
         ttk.Label(cadre, text="Photos (JPG) :").grid(row=0, column=0, sticky="w", **pad)
-        bulle(ttk.Entry(cadre, textvariable=self.v_source),
-              "Dossier contenant les photos JPG à anonymiser. Rien n'y est modifié.").grid(
-            row=0, column=1, sticky="ew", **pad)
+        self.e_source = bulle(ttk.Entry(cadre, textvariable=self.v_source),
+                              "Dossier contenant les photos JPG à anonymiser. Rien n'y est modifié.")
+        self.e_source.grid(row=0, column=1, sticky="ew", **pad)
+        self.e_source.bind("<Return>", lambda e: self._source_changee())
+        self.e_source.bind("<FocusOut>", lambda e: self._source_changee())
+        self.voyant = bulle(tk.Canvas(cadre, width=16, height=16, highlightthickness=0),
+                            "Rouge : des photos du dossier sont encore dans le nuage OneDrive ; leur téléchargement "
+                            "démarre dès que le dossier est choisi.\nVert : toutes les photos sont sur cet "
+                            "ordinateur.")
+        self.voyant.grid(row=0, column=2, **pad)
+        self.l_voyant = ttk.Label(cadre, text="", width=26)
+        self.l_voyant.grid(row=0, column=3, sticky="w")
         bulle(ttk.Button(cadre, text="Choisir…", command=self._choisir_source),
               "Choisir le dossier des photos. La sortie est alors proposée dans son sous-dossier "
-              "« anonymisé ».").grid(row=0, column=2, **pad)
+              "« anonymisé », et le téléchargement OneDrive des photos démarre.").grid(row=0, column=4, **pad)
         ttk.Label(cadre, text="Sortie :").grid(row=1, column=0, sticky="w", **pad)
         bulle(ttk.Entry(cadre, textvariable=self.v_sortie),
-              "Dossier où sont écrites les photos anonymisées. Il doit être différent du dossier des "
-              "photos.").grid(row=1, column=1, sticky="ew", **pad)
+              "Dossier où sont écrites les photos anonymisées. Son contenu (JPG et fichier des zones) est "
+              "effacé à chaque nouvelle exécution enregistrée.").grid(row=1, column=1, columnspan=3,
+                                                                     sticky="ew", **pad)
         bulle(ttk.Button(cadre, text="Choisir…", command=self._choisir_sortie),
-              "Choisir un autre dossier de sortie.").grid(row=1, column=2, **pad)
-        bulle(ttk.Checkbutton(cadre, text="Inclure les sous-dossiers", variable=self.v_sous_dossiers),
+              "Choisir un autre dossier de sortie.").grid(row=1, column=4, **pad)
+        bulle(ttk.Checkbutton(cadre, text="Inclure les sous-dossiers", variable=self.v_sous_dossiers,
+                              command=self._source_changee),
               "Traiter aussi les photos des sous-dossiers ; leur arborescence est reproduite dans la "
               "sortie.").grid(row=2, column=1, sticky="w", **pad)
         cadre.columnconfigure(1, weight=1)
 
-        opt = ttk.LabelFrame(page, text="Options")
-        opt.pack(fill="x", **pad)
+        opt = ttk.LabelFrame(haut, text="Options")
+        opt.pack(side="left", fill="both", padx=4, pady=2)
         bulle(ttk.Checkbutton(opt, text="Visages", variable=self.v_visages),
               "Détecter et flouter automatiquement les visages.").grid(row=0, column=0, sticky="w", **pad)
-        bulle(ttk.Checkbutton(opt, text="Plaques d'immatriculation", variable=self.v_plaques),
+        bulle(ttk.Checkbutton(opt, text="Plaques", variable=self.v_plaques),
               "Détecter et flouter automatiquement les plaques d'immatriculation.").grid(
             row=0, column=1, sticky="w", **pad)
+        bulle(ttk.Checkbutton(opt, text="Supprimer les métadonnées", variable=self.v_metadonnees),
+              "Coché : les photos de sortie ne contiennent plus aucune information EXIF.\nDécoché : ces "
+              "informations sont gardées, sauf la position GPS qui est toujours retirée.").grid(
+            row=0, column=2, columnspan=2, sticky="w", **pad)
         ttk.Label(opt, text="Méthode :").grid(row=1, column=0, sticky="w", **pad)
-        bulle(ttk.Combobox(opt, textvariable=self.v_methode, state="readonly", width=12,
+        bulle(ttk.Combobox(opt, textvariable=self.v_methode, state="readonly", width=8,
                            values=["flou", "pixels", "noir"]),
               "flou : mosaïque adoucie (le plus discret).\npixels : mosaïque visible.\n"
               "noir : zone masquée en noir (le plus sûr).").grid(row=1, column=1, sticky="w", **pad)
-        ttk.Label(opt, text="Force du floutage :").grid(row=2, column=0, sticky="w", **pad)
-        bulle(tk.Scale(opt, from_=1, to=5, orient="horizontal", variable=self.v_force, length=180),
+        ttk.Label(opt, text="Force :").grid(row=1, column=2, sticky="e", **pad)
+        bulle(tk.Scale(opt, from_=1, to=5, orient="horizontal", variable=self.v_force, length=120,
+                       command=lambda v: self._reglage_change()),
               "1 = léger, 5 = très fort : plus c'est fort, plus les blocs de la mosaïque sont gros.").grid(
+            row=1, column=3, sticky="w", **pad)
+        ttk.Label(opt, text="Sensibilité :").grid(row=2, column=0, sticky="w", **pad)
+        bulle(tk.Scale(opt, from_=1, to=5, orient="horizontal", variable=self.v_sensibilite, length=120),
+              "Seuil de la détection automatique. 1 = seulement les détections sûres ; 5 = trouve davantage "
+              "(visages de profil, plaques lointaines) mais avec plus de fausses détections. 3 conseillé ; "
+              "sur des photos de constat, 3 retrouve la quasi-totalité des plaques.").grid(
             row=2, column=1, sticky="w", **pad)
-        ttk.Label(opt, text="Sensibilité de détection :").grid(row=3, column=0, sticky="w", **pad)
-        bulle(tk.Scale(opt, from_=1, to=5, orient="horizontal", variable=self.v_sensibilite, length=180),
-              "Plus haut : moins d'oublis mais davantage de fausses détections, à écarter ensuite dans "
-              "« Vérifier / corriger… ».").grid(row=3, column=1, sticky="w", **pad)
-        ttk.Label(opt, text="(5 = trouve plus de choses, mais plus de fausses alertes)",
-                  foreground="gray").grid(row=3, column=2, sticky="w", **pad)
-        bulle(ttk.Checkbutton(opt, text="Supprimer les métadonnées (GPS, appareil, date…)",
-                              variable=self.v_metadonnees),
-              "Coché : les photos de sortie ne contiennent plus aucune information EXIF.\nDécoché : ces "
-              "informations sont gardées, sauf la position GPS qui est toujours retirée.").grid(
-            row=4, column=0, columnspan=3, sticky="w", **pad)
-        bulle(ttk.Checkbutton(opt, text="Ignorer les photos déjà anonymisées dans la sortie",
-                              variable=self.v_deja),
-              "Pour reprendre un traitement interrompu : les photos déjà présentes dans la sortie ne sont "
-              "pas retraitées.").grid(row=5, column=0, columnspan=3, sticky="w", **pad)
-        ttk.Label(opt, text="Qualité JPG enregistrée :").grid(row=6, column=0, sticky="w", **pad)
-        bulle(tk.Scale(opt, from_=50, to=100, orient="horizontal", variable=self.v_qualite, length=180),
+        ttk.Label(opt, text="Qualité JPG :").grid(row=2, column=2, sticky="e", **pad)
+        bulle(tk.Scale(opt, from_=50, to=100, orient="horizontal", variable=self.v_qualite, length=120),
               "Compression des JPG écrits dans la sortie (photos floutées et recopiées). 92 par défaut ; "
-              "plus bas = fichiers plus légers mais qualité moindre.").grid(row=6, column=1, sticky="w", **pad)
-        ttk.Label(opt, text="(100 = meilleure qualité, fichiers plus lourds ; 85-95 conseillé)",
-                  foreground="gray").grid(row=6, column=2, sticky="w", **pad)
+              "plus bas = fichiers plus légers mais qualité moindre ; 85-95 conseillé.").grid(
+            row=2, column=3, sticky="w", **pad)
 
-        bas = ttk.Frame(page)
-        bas.pack(fill="x", **pad)
-        self.b_lancer = bulle(ttk.Button(bas, text="Anonymiser", command=self._lancer),
-                              "Détecter les visages et plaques sur toutes les photos du dossier et écrire les "
-                              "photos floutées dans la sortie.")
+        boutons = ttk.Frame(page)
+        boutons.pack(fill="x", padx=8, pady=4)
+        self.b_lancer = bulle(ttk.Button(boutons, text="Anonymiser", command=self._lancer),
+                              "Détection automatique sur toutes les photos du dossier : chaque photo s'affiche "
+                              "à gauche telle quelle et à droite floutée. À la fin, la sortie est vidée puis "
+                              "reçoit toutes les photos.")
         self.b_lancer.pack(side="left", padx=4)
-        self.b_arreter = bulle(ttk.Button(bas, text="Arrêter", command=self.arreter.set, state="disabled"),
-                               "Interrompre le traitement après la photo en cours. Le programme demande alors "
-                               "s'il faut copier dans la sortie les photos déjà traitées ; sinon rien n'est copié.")
-        self.b_arreter.pack(side="left", padx=4)
-        self.b_verifier = bulle(ttk.Button(bas, text="Vérifier / corriger…", command=self._verifier),
-                                "Revoir une à une les photos traitées : ajouter une zone oubliée, écarter une "
-                                "fausse détection.")
-        self.b_verifier.pack(side="left", padx=4)
-        self.b_manuel = bulle(ttk.Button(bas, text="Mode manuel…", command=self._mode_manuel),
-                              "Faire défiler toutes les photos avec les flèches ← → et flouter au clic ; "
-                              "tout est enregistré à la fin, quand vous cliquez « Terminer et enregistrer ».")
+        self.b_manuel = bulle(ttk.Button(boutons, text="Mode manuel", command=self._entrer_manuel),
+                              "Faire défiler les photos (← →) et flouter au clic dans cette même fenêtre. Les "
+                              "zones de l'exécution précédente sont reprises. Rien n'est écrit avant « Terminer "
+                              "et enregistrer ».")
         self.b_manuel.pack(side="left", padx=4)
-        bulle(ttk.Button(bas, text="Ouvrir la sortie", command=self._ouvrir_sortie),
+        self.b_arreter = bulle(ttk.Button(boutons, text="Arrêter", command=self.arreter.set, state="disabled"),
+                               "Interrompre le traitement automatique. Le programme demande alors s'il faut "
+                               "copier les photos déjà traitées ; sinon rien n'est copié et la sortie reste "
+                               "inchangée.")
+        self.b_arreter.pack(side="left", padx=4)
+        bulle(ttk.Button(boutons, text="Ouvrir la sortie", command=self._ouvrir_sortie),
               "Ouvrir le dossier de sortie dans l'Explorateur Windows.").pack(side="left", padx=4)
 
-        ligne = ttk.Frame(page)
-        ligne.pack(fill="x", **pad)
-        self.compteur = ttk.Label(ligne, text="", width=14, anchor="e")
+        # barre du mode manuel (affichée seulement en mode manuel)
+        self.barre_manuel = ttk.Frame(boutons)
+        bulle(ttk.Button(self.barre_manuel, text="◀ Précédente", command=lambda: self._aller(-1)),
+              "Photo précédente (flèche ←).").pack(side="left", padx=2)
+        bulle(ttk.Button(self.barre_manuel, text="Suivante ▶", command=lambda: self._aller(1)),
+              "Photo suivante (flèche →).").pack(side="left", padx=2)
+        bulle(ttk.Button(self.barre_manuel, text="Annuler (Ctrl+Z)", command=self._annuler_zone),
+              "Retirer la dernière zone ajoutée à la main sur cette photo.").pack(side="left", padx=2)
+        self.b_terminer = bulle(ttk.Button(self.barre_manuel, text="Terminer et enregistrer",
+                                           command=self._terminer_manuel),
+                                "Vider la sortie puis y écrire TOUTES les photos du dossier (floutées ou "
+                                "simplement recopiées) et le fichier des zones.")
+        self.b_terminer.pack(side="left", padx=(12, 2))
+        bulle(ttk.Button(self.barre_manuel, text="Abandonner", command=self._abandonner_manuel),
+              "Quitter le mode manuel sans rien copier (confirmation demandée s'il y a des "
+              "modifications).").pack(side="left", padx=2)
+
+        # deux vues : original à gauche, résultat à droite
+        vues = ttk.Frame(page)
+        vues.pack(fill="both", expand=True, padx=8)
+        vues.columnconfigure(0, weight=1, uniform="v")
+        vues.columnconfigure(1, weight=1, uniform="v")
+        vues.rowconfigure(1, weight=1)
+        ttk.Label(vues, text="Photo d'origine", anchor="center").grid(row=0, column=0, sticky="ew")
+        self.bandeau = tk.Label(vues, text="Résultat (photo de sortie)", anchor="center")
+        self.bandeau.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        self._bandeau_defaut = (self.bandeau.cget("background"), self.bandeau.cget("foreground"))
+        self.vue_orig = bulle(VuePhoto(vues), "Photo d'origine (jamais modifiée) avec les zones à flouter.")
+        self.vue_orig.grid(row=1, column=0, sticky="nsew", padx=(0, 2))
+        self.vue_res = bulle(VuePhoto(vues), "Résultat tel qu'il sera enregistré dans la sortie.")
+        self.vue_res.grid(row=1, column=1, sticky="nsew", padx=(2, 0))
+        self.l_photo = ttk.Label(vues, text="", anchor="center")
+        self.l_photo.grid(row=2, column=0, columnspan=2, sticky="ew")
+        self.aide_mode = texte_aide(vues, AIDE_AUTO)
+        self.aide_mode.grid(row=3, column=0, columnspan=2, sticky="ew")
+        for v in (self.vue_orig, self.vue_res):
+            v.configure(cursor="crosshair")
+            v.bind("<ButtonPress-1>", lambda e, v=v: self._presser(v, e))
+            v.bind("<B1-Motion>", lambda e, v=v: self._glisser(v, e))
+            v.bind("<ButtonRelease-1>", lambda e, v=v: self._relacher(v, e))
+            v.bind("<Button-3>", lambda e, v=v: self._clic_droit(v, e))
+            v.bind("<Motion>", lambda e, v=v: self._bouger(v, e))
+            v.bind("<Leave>", lambda e: self._sortir())
+            v.bind("<MouseWheel>", lambda e: self._taille_pinceau(1 if e.delta > 0 else -1))
+
+        bas = ttk.Frame(page)
+        bas.pack(fill="x", padx=8, pady=(2, 0))
+        self.compteur = ttk.Label(bas, text="", width=22, anchor="e")
         self.compteur.pack(side="right", padx=(8, 0))
-        self.progres = bulle(ttk.Progressbar(ligne, mode="determinate"),
-                             "Avancement : photos traitées / total, puis copie dans la sortie à la fin.")
+        self.progres = bulle(ttk.Progressbar(bas, mode="determinate"),
+                             "Avancement : photos traitées (ou vues en mode manuel) / total, puis copie dans la "
+                             "sortie.")
         self.progres.pack(side="left", fill="x", expand=True)
-        self.journal = tk.Text(page, height=7, wrap="word", state="disabled")
-        self.journal.pack(fill="both", expand=True, **pad)
+        self.journal = tk.Text(page, height=4, wrap="word", state="disabled")
+        self.journal.pack(fill="x", padx=8, pady=(2, 6))
+        self._dessiner_voyant(None)
 
     # ----------------------------------------------------------- dépendances
     def _construire_dependances(self, page):
@@ -400,11 +517,13 @@ class Application(tk.Tk):
                                    "l'onglet « Dépendances ».")
         return self.modules_ok
 
+    # ------------------------------------------------------------ dossiers
     def _choisir_source(self):
         d = filedialog.askdirectory(title="Dossier des photos", initialdir=self.v_source.get() or None)
         if d:
             self.v_source.set(os.path.normpath(d))
             self.v_sortie.set(os.path.join(os.path.normpath(d), NOM_SORTIE))
+            self._source_changee()
 
     def _choisir_sortie(self):
         d = filedialog.askdirectory(title="Dossier de sortie", initialdir=self.v_sortie.get() or None)
@@ -416,20 +535,67 @@ class Application(tk.Tk):
         if s and Path(s).is_dir():
             os.startfile(s)
 
-    def _montrer_apercu(self, image, titre: str):
-        self._apercu_pil = image
-        self.apercu_titre.configure(text=titre)
-        self._dessiner_apercu()
+    def _dossiers(self, avertir: bool = True) -> tuple[Path, Path] | None:
+        def erreur(t):
+            if avertir:
+                messagebox.showerror("Anonymiseur", t)
+            return None
+        texte = self.v_source.get().strip()
+        src = Path(texte).resolve() if texte else None   # Path("") = dossier courant : à refuser
+        if src is None or not src.is_dir():
+            return erreur("Choisissez un dossier de photos existant.")
+        sortie = Path(self.v_sortie.get().strip() or NOM_SORTIE)
+        if not sortie.is_absolute():   # « anonymisé » seul = sous-dossier de la source
+            sortie = src / sortie
+        sortie = sortie.resolve()
+        if avertir:
+            self.v_sortie.set(str(sortie))
+        if sortie == src:
+            return erreur("Le dossier de sortie doit être différent du dossier des photos : les originaux ne "
+                          "doivent pas être écrasés.")
+        if sortie in src.parents or sortie.parent == sortie:
+            # la sortie est vidée à chaque exécution : elle ne doit pas contenir les originaux
+            return erreur("Le dossier de sortie ne peut pas contenir le dossier des photos (il est vidé à "
+                          "chaque exécution). Choisissez un sous-dossier, par exemple « anonymisé ».")
+        return src, sortie
 
-    def _dessiner_apercu(self):
-        if self._apercu_pil is None:
+    def _photos(self, src: Path, sortie: Path) -> list:
+        return an.lister_photos(src, self.v_sous_dossiers.get(), exclure=sortie)
+
+    # ------------------------------------------------------------ OneDrive
+    def _source_changee(self):
+        if self.chargeur:
+            self.chargeur.arreter()
+            self.chargeur = None
+        d = self._dossiers(avertir=False) if self.modules_ok else None
+        if d is None:
+            self.photos_source = []
+            self._dessiner_voyant(None)
             return
-        w, h = max(50, self.apercu.winfo_width() - 4), max(50, self.apercu.winfo_height() - 4)
-        img = self._apercu_pil.copy()
-        img.thumbnail((w, h))
-        self._apercu_tk = ImageTk.PhotoImage(img)
-        self.apercu.configure(image=self._apercu_tk, text="")
+        self.photos_source = self._photos(*d)
+        self.chargeur = onedrive.Chargeur(self.photos_source).demarrer()
+        self._surveiller_voyant()
 
+    def _surveiller_voyant(self):
+        if not self.photos_source:
+            self._dessiner_voyant(None)
+            return
+        locales = onedrive.compter_locales(self.photos_source)
+        total = len(self.photos_source)
+        self._dessiner_voyant(locales == total, f"{locales} / {total} photos disponibles"
+                              + ("" if locales == total else " (téléchargement…)"))
+        if locales < total and self.chargeur and self.chargeur.actif():
+            self.after(1500, self._surveiller_voyant)
+        elif locales < total:
+            self.l_voyant.configure(text=f"{locales} / {total} disponibles (non téléchargées)")
+
+    def _dessiner_voyant(self, ok, texte: str = ""):
+        self.voyant.delete("all")
+        if ok is not None:
+            self.voyant.create_oval(2, 2, 14, 14, fill="#20b040" if ok else "#e02020", outline="")
+        self.l_voyant.configure(text=texte)
+
+    # ------------------------------------------------------------ réglages
     def _ecrire(self, texte: str):
         self.journal.configure(state="normal")
         self.journal.insert("end", texte + "\n")
@@ -443,8 +609,7 @@ class Application(tk.Tk):
             seuil_visage={1: 0.8, 2: 0.7, 3: 0.55, 4: 0.45, 5: 0.35}[s],
             seuil_plaque={1: 0.6, 2: 0.45, 3: 0.30, 4: 0.20, 5: 0.12}[s],
             methode=self.v_methode.get(), force=self.v_force.get(),
-            supprimer_metadonnees=self.v_metadonnees.get(),
-            qualite_jpeg=self.v_qualite.get())
+            supprimer_metadonnees=self.v_metadonnees.get(), qualite_jpeg=self.v_qualite.get())
 
     def _memoriser(self):
         ecrire_reglages({
@@ -452,29 +617,40 @@ class Application(tk.Tk):
             "sous_dossiers": self.v_sous_dossiers.get(), "visages": self.v_visages.get(),
             "plaques": self.v_plaques.get(), "methode": self.v_methode.get(),
             "force": self.v_force.get(), "sensibilite": self.v_sensibilite.get(),
-            "supprimer_metadonnees": self.v_metadonnees.get(), "ignorer_deja_faites": self.v_deja.get(),
-            "qualite_jpeg": self.v_qualite.get()})
+            "supprimer_metadonnees": self.v_metadonnees.get(), "qualite_jpeg": self.v_qualite.get()})
 
-    def _dossiers(self) -> tuple[Path, Path] | None:
-        texte = self.v_source.get().strip()
-        src = Path(texte).resolve() if texte else None   # Path("") = dossier courant : à refuser
-        if src is None or not src.is_dir():
-            messagebox.showerror("Anonymiseur", "Choisissez un dossier de photos existant.")
-            return None
-        sortie = Path(self.v_sortie.get().strip() or NOM_SORTIE)
-        if not sortie.is_absolute():   # « anonymisé » seul = sous-dossier de la source
-            sortie = src / sortie
-        sortie = sortie.resolve()
-        self.v_sortie.set(str(sortie))
-        if sortie.resolve() == src.resolve():
-            messagebox.showerror("Anonymiseur", "Le dossier de sortie doit être différent du dossier "
-                                 "des photos : les originaux ne doivent pas être écrasés.")
-            return None
-        return src, sortie
+    def _reglage_change(self):
+        if self.manuel and self.manuel.petite is not None:
+            self._afficher_manuel()
 
-    # ------------------------------------------------------------ traitement
+    def _occupe(self, actif: bool):
+        """Boutons pendant un traitement automatique ou le mode manuel."""
+        etat = "disabled" if actif else "normal"
+        self.b_lancer.configure(state=etat)
+        self.b_manuel.configure(state=etat)
+
+    # ------------------------------------------------------------ publication
+    def _publier(self, src: Path, sortie: Path, prepa: Path, cles: list, zones: dict):
+        """Vide la sortie de l'exécution précédente puis y place les photos préparées et les zones."""
+        effaces = an.effacer_sortie(sortie)
+        sortie.mkdir(parents=True, exist_ok=True)
+        self.progres.configure(maximum=max(1, len(cles)), value=0)
+        for n, cle in enumerate(cles, 1):
+            dest = sortie / cle
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(prepa / cle), str(dest))
+            self.progres.configure(value=n)
+            self.compteur.configure(text=f"copie {n} / {len(cles)}")
+            if n % 10 == 0:
+                self.update()
+        an.enregistrer_zones(sortie, src, {k: zones[k] for k in cles})
+        if effaces:
+            self._ecrire(f"{effaces} photo(s) de l'exécution précédente effacée(s).")
+        self._ecrire(f"{len(cles)} photo(s) enregistrée(s) dans {sortie}.")
+
+    # ------------------------------------------------------------ automatique
     def _lancer(self):
-        if not self._modules_prets():
+        if not self._modules_prets() or self.manuel:
             return
         d = self._dossiers()
         if d is None:
@@ -485,30 +661,29 @@ class Application(tk.Tk):
             messagebox.showwarning("Anonymiseur", "Cochez au moins « Visages » ou « Plaques ».")
             return
         self._memoriser()
-        photos = an.lister_photos(src, self.v_sous_dossiers.get(), exclure=sortie)
+        photos = self._photos(src, sortie)
         if not photos:
             messagebox.showinfo("Anonymiseur", "Aucune photo JPG dans ce dossier.")
             return
         self.arreter.clear()
-        self.b_lancer.configure(state="disabled")
-        self.b_verifier.configure(state="disabled")
-        self.b_manuel.configure(state="disabled")
+        self.abandon = False
+        self._occupe(True)
         self.b_arreter.configure(state="normal")
         self.progres.configure(maximum=len(photos), value=0)
         self.compteur.configure(text=f"0 / {len(photos)}")
-        self.abandon = False
+        self._mode_affichage(manuel=False)
         prepa = Path(tempfile.mkdtemp(prefix=PREFIXE_PREPA))
-        self._ecrire(f"{len(photos)} photo(s) à traiter → {sortie} (copie dans la sortie à la fin)")
-        self.fil = threading.Thread(target=self._traiter,
-                                    args=(photos, src, sortie, prepa, reg, self.v_deja.get()), daemon=True)
+        self._ecrire(f"{len(photos)} photo(s) à traiter → {sortie}")
+        self.fil = threading.Thread(target=self._traiter, args=(photos, src, sortie, prepa, reg), daemon=True)
         self.fil.start()
 
-    def _traiter(self, photos, src, sortie, prepa, reg, ignorer_deja):
+    def _traiter(self, photos, src, sortie, prepa, reg):
         """Fil de traitement. Les photos sont écrites dans `prepa` (dossier temporaire) :
         rien n'arrive dans la sortie avant la fin, ou avant l'accord de l'utilisateur s'il arrête."""
         msg = self.file_messages.put
         t0 = time.time()
-        zones_toutes = an.charger_zones(sortie)
+        anciennes = an.charger_zones(sortie)     # zones ajoutées / écartées à la main : reprises
+        zones_toutes: dict = {}
         faites: list[str] = []
         nb_v = nb_p = nb_err = 0
         interrompu = False
@@ -520,32 +695,27 @@ class Application(tk.Tk):
                     msg(("log", "Arrêté par l'utilisateur."))
                     break
                 cle = p.relative_to(src).as_posix()
-                if ignorer_deja and an.chemin_sortie(p, src, sortie).exists() and cle in zones_toutes:
-                    msg(("progres", i))
-                    continue
                 try:
                     bgr, pil = an.lire_image(p)
-                    # les zones ajoutées / écartées à la main sont conservées
-                    manuelles = [z for z in zones_toutes.get(cle, []) if z.type == "manuel"]
-                    ecartees = [z for z in zones_toutes.get(cle, []) if not z.actif and z.type != "manuel"]
+                    manuelles = [z for z in anciennes.get(cle, []) if z.type == "manuel"]
+                    ecartees = [z for z in anciennes.get(cle, []) if not z.actif and z.type != "manuel"]
                     zones = det.detecter(bgr)
                     for z in zones:
                         if any(_meme_zone(z, e) for e in ecartees):
                             z.actif = False
                     zones += manuelles
                     zones_toutes[cle] = zones
-                    v = sum(z.type == "visage" and z.actif for z in zones)
-                    pl = sum(z.type == "plaque" and z.actif for z in zones)
-                    # toutes les photos iront dans la sortie : floutées ou simplement recompressées
                     resultat = an.flouter(bgr, zones, reg)
                     an.ecrire_image(resultat, pil, an.chemin_sortie(p, src, prepa), reg)
                     faites.append(cle)
+                    v = sum(z.type == "visage" and z.actif for z in zones)
+                    pl = sum(z.type == "plaque" and z.actif for z in zones)
                     nb_v += v
                     nb_p += pl
                     texte = f"{cle} : {v} visage(s), {pl} plaque(s)" if v or pl else f"{cle} : rien à flouter"
-                    vignette = Image.fromarray(cv2.cvtColor(resultat, cv2.COLOR_BGR2RGB))
-                    vignette.thumbnail((1000, 1000))
-                    msg(("apercu", (vignette, f"{i}/{len(photos)} — {texte}")))
+                    petite_o, f = an.reduire(bgr, COTE_APERCU)
+                    petite_r, _ = an.reduire(resultat, COTE_APERCU)
+                    msg(("photo", (_vers_pil(petite_o), _vers_pil(petite_r), f, zones, f"{i}/{len(photos)} — {texte}")))
                     msg(("log", texte))
                 except Exception as e:  # une photo illisible ne bloque pas les autres
                     nb_err += 1
@@ -555,38 +725,25 @@ class Application(tk.Tk):
             interrompu = True
             msg(("log", f"ERREUR : {e}"))
         finally:
-            msg(("log", f"Traitement terminé en {time.time() - t0:.0f} s : {nb_v} visage(s), {nb_p} plaque(s)"
-                        + (f", {nb_err} erreur(s)" if nb_err else "") + "."))
+            duree = time.time() - t0
+            msg(("log", f"Traitement terminé en {duree:.0f} s ({duree / max(1, len(faites)):.1f} s par photo) : "
+                        f"{nb_v} visage(s), {nb_p} plaque(s)" + (f", {nb_err} erreur(s)" if nb_err else "") + "."))
             if self.abandon:
                 shutil.rmtree(prepa, ignore_errors=True)
             msg(("fin", {"src": src, "sortie": sortie, "prepa": prepa, "faites": faites,
                          "zones": zones_toutes, "interrompu": interrompu}))
 
     def _terminer_traitement(self, info):
-        """Fin du traitement (fil principal) : copie dans la sortie, ou rien si l'utilisateur refuse."""
+        """Fin du traitement (fil principal) : publication, ou rien si l'utilisateur refuse."""
         faites, prepa = info["faites"], info["prepa"]
         copier = bool(faites)
         if faites and info["interrompu"]:
             copier = messagebox.askyesno(
                 "Anonymiseur", f"Traitement interrompu : {len(faites)} photo(s) déjà traitée(s).\n\n"
-                               "Les copier dans le dossier de sortie ?\n(Non : rien n'est copié.)")
+                               "Les enregistrer dans le dossier de sortie ? Son contenu précédent sera effacé.\n"
+                               "(Non : rien n'est copié, la sortie reste inchangée.)")
         if copier:
-            sortie = info["sortie"]
-            self.progres.configure(maximum=len(faites), value=0)
-            for n, cle in enumerate(faites, 1):
-                dest = sortie / cle
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(prepa / cle), str(dest))
-                self.progres.configure(value=n)
-                self.compteur.configure(text=f"copie {n} / {len(faites)}")
-                if n % 10 == 0:
-                    self.update()
-            zones = an.charger_zones(sortie)                     # zones déjà présentes dans la sortie
-            zones.update({k: info["zones"][k] for k in faites})  # + celles des photos copiées
-            an.enregistrer_zones(sortie, info["src"], zones)
-            self._ecrire(f"{len(faites)} photo(s) copiée(s) dans {sortie}.")
-            self._ecrire("Contrôlez le résultat avec « Vérifier / corriger… » : la détection automatique "
-                         "peut manquer un visage de profil ou une plaque lointaine.")
+            self._publier(info["src"], info["sortie"], prepa, faites, info["zones"])
         elif faites:
             self._ecrire("Rien n'a été copié dans la sortie.")
         shutil.rmtree(prepa, ignore_errors=True)
@@ -597,8 +754,11 @@ class Application(tk.Tk):
                 genre, val = self.file_messages.get_nowait()
                 if genre == "log":
                     self._ecrire(val)
-                elif genre == "apercu":
-                    self._montrer_apercu(*val)
+                elif genre == "photo":
+                    orig, res, f, zones, titre = val
+                    self.vue_orig.montrer(orig, f, zones)
+                    self.vue_res.montrer(res, f)
+                    self.l_photo.configure(text=titre)
                 elif genre == "progres":
                     self.progres.configure(value=val)
                     self.compteur.configure(text=f"{val} / {int(self.progres.cget('maximum'))}")
@@ -611,6 +771,7 @@ class Application(tk.Tk):
                     self.modules_ok = charger_modules()
                     if not manquants:
                         messagebox.showinfo("Anonymiseur", "Toutes les dépendances sont installées.")
+                        self._source_changee()
                     elif val:
                         messagebox.showwarning("Anonymiseur", "Installation faite, mais des éléments restent "
                                                "en défaut. Si un paquet était déjà chargé, fermez et "
@@ -618,56 +779,281 @@ class Application(tk.Tk):
                 elif genre == "fin":
                     self.b_arreter.configure(state="disabled")
                     self._terminer_traitement(val)
-                    self.b_lancer.configure(state="normal")
-                    self.b_verifier.configure(state="normal")
-                    self.b_manuel.configure(state="normal")
-                    self.b_arreter.configure(state="disabled")
+                    self._occupe(False)
         except queue.Empty:
             pass
-        self.after(100, self._lire_messages)
+        self.after(50, self._lire_messages)
 
-    def _verifier(self):
-        if not self._modules_prets():
+    # ------------------------------------------------------------ mode manuel
+    def _mode_affichage(self, manuel: bool):
+        if manuel:
+            self.bandeau.configure(text=BANDEAU_MANUEL, background="#d01818", foreground="#ffffff",
+                                   font=("Segoe UI", 11, "bold"))
+            self.aide_mode.configure(text=AIDE_MANUEL)
+            self.barre_manuel.pack(side="left", padx=(16, 0))
+        else:
+            self.bandeau.configure(text="Résultat (photo de sortie)", background=self._bandeau_defaut[0],
+                                   foreground=self._bandeau_defaut[1], font="TkDefaultFont")
+            self.aide_mode.configure(text=AIDE_AUTO)
+            self.barre_manuel.pack_forget()
+
+    def _entrer_manuel(self):
+        if not self._modules_prets() or (self.fil and self.fil.is_alive()):
             return
         d = self._dossiers()
         if d is None:
             return
         src, sortie = d
-        zones = an.charger_zones(sortie)
-        if not zones:
-            messagebox.showinfo("Anonymiseur", "Aucune photo anonymisée dans ce dossier de sortie : "
-                                "lancez d'abord « Anonymiser ».")
-            return
-        self._memoriser()
-        FenetreVerification(self, src, sortie, zones, self.reglages())
-
-    def _mode_manuel(self):
-        if not self._modules_prets():
-            return
-        if self.fil and self.fil.is_alive():
-            messagebox.showwarning("Anonymiseur", "Attendez la fin de l'anonymisation en cours.")
-            return
-        d = self._dossiers()
-        if d is None:
-            return
-        src, sortie = d
-        photos = an.lister_photos(src, self.v_sous_dossiers.get(), exclure=sortie)
+        photos = self._photos(src, sortie)
         if not photos:
             messagebox.showinfo("Anonymiseur", "Aucune photo JPG dans ce dossier.")
             return
         self._memoriser()
-        FenetreVerification(self, src, sortie, an.charger_zones(sortie), self.reglages(),
-                            manuel=True, photos=photos)
+        self.manuel = ModeManuel(src, sortie, photos, an.charger_zones(sortie))
+        self._occupe(True)
+        self._mode_affichage(manuel=True)
+        self._ecrire(f"Mode manuel : {len(photos)} photo(s). Rien n'est écrit avant « Terminer et enregistrer ».")
+        self._aller_a(0)
+        self.vue_res.focus_set()
+
+    def _quitter_manuel(self):
+        self.manuel = None
+        self._mode_affichage(manuel=False)
+        self._occupe(False)
+        self.vue_orig.vider()
+        self.vue_res.vider()
+        self.l_photo.configure(text="")
+
+    def _aller(self, pas: int):
+        if self.manuel:
+            self._aller_a(max(0, min(len(self.manuel.cles) - 1, self.manuel.indice + pas)))
+
+    def _aller_a(self, i: int):
+        m = self.manuel
+        if m is None or i == m.indice:
+            return
+        m.indice = i
+        try:
+            m.bgr, _ = an.lire_image(m.src / m.cle)
+        except Exception as e:
+            m.bgr = None
+            self.vue_orig.vider(f"Photo illisible :\n{e}")
+            self.vue_res.vider()
+            self.l_photo.configure(text=f"{i + 1}/{len(m.cles)} — {m.cle} : illisible")
+            return
+        m.petite, m.facteur = an.reduire(m.bgr, COTE_APERCU)
+        m.vues.add(m.cle)
+        self.progres.configure(maximum=len(m.cles), value=len(m.vues))
+        self.compteur.configure(text=f"{len(m.vues)} / {len(m.cles)} vues")
+        self._afficher_manuel()
+
+    def _afficher_manuel(self):
+        m = self.manuel
+        if m is None or m.petite is None:
+            return
+        zones = m.zones[m.cle]
+        reduites = an.zones_reduites(zones, m.facteur)
+        resultat = an.flouter(m.petite, reduites, self.reglages())
+        self.vue_orig.montrer(_vers_pil(m.petite), m.facteur, zones)
+        self.vue_res.montrer(_vers_pil(resultat), m.facteur, [])
+        nv = sum(z.type == "visage" and z.actif for z in zones)
+        npl = sum(z.type == "plaque" and z.actif for z in zones)
+        nm = sum(z.type == "manuel" for z in zones)
+        self.l_photo.configure(text=f"{m.indice + 1}/{len(m.cles)} — {m.cle} : {nv} visage(s), {npl} plaque(s), "
+                                    f"{nm} zone(s) manuelle(s)" + ("  — modifiée" if m.cle in m.modifiees else "")
+                                    + f"  · carré {m.taille:.0%}")
+        self._dessiner_pinceau()
+
+    def _modifiee(self):
+        self.manuel.modifiees.add(self.manuel.cle)
+        self._afficher_manuel()
+
+    def _cote_pinceau(self) -> int:
+        m = self.manuel
+        return max(8, int(min(m.bgr.shape[:2]) * m.taille))
+
+    def _dessiner_pinceau(self):
+        for v in (self.vue_orig, self.vue_res):
+            v.delete("pinceau")
+        if not self.manuel or self.manuel.bgr is None or self.souris is None or self.debut is not None:
+            return
+        vue, x, y = self.souris
+        px, py = vue.vers_photo(x, y)
+        r = self._cote_pinceau() / 2
+        for v in (self.vue_orig, self.vue_res):   # même cadre sur les deux images
+            x1, y1 = v.vers_ecran(px - r, py - r)
+            x2, y2 = v.vers_ecran(px + r, py + r)
+            v.create_rectangle(x1, y1, x2, y2, outline="#ffff40", dash=(3, 3), width=2, tags="pinceau")
+
+    def _bouger(self, vue, ev):
+        self.souris = (vue, ev.x, ev.y)
+        self._dessiner_pinceau()
+
+    def _sortir(self):
+        self.souris = None
+        self._dessiner_pinceau()
+
+    def _taille_pinceau(self, sens: int):
+        if not self.manuel:
+            return
+        m = self.manuel
+        m.taille = min(0.6, max(0.02, m.taille * (1.15 if sens > 0 else 1 / 1.15)))
+        self._afficher_manuel()
+
+    def _presser(self, vue, ev):
+        if not self.manuel or self.manuel.bgr is None:
+            return
+        vue.focus_set()
+        self.debut = (vue, ev.x, ev.y)
+        self._dessiner_pinceau()
+
+    def _glisser(self, vue, ev):
+        if self.debut and self.debut[0] is vue:
+            vue.delete("trace")
+            vue.create_rectangle(self.debut[1], self.debut[2], ev.x, ev.y, outline=COULEURS["manuel"], width=2,
+                                 tags="trace")
+
+    def _relacher(self, vue, ev):
+        if not self.debut or self.debut[0] is not vue or not self.manuel:
+            self.debut = None
+            return
+        _, x0, y0 = self.debut
+        self.debut = None
+        vue.delete("trace")
+        m = self.manuel
+        h, w = m.bgr.shape[:2]
+        if abs(ev.x - x0) < 4 and abs(ev.y - y0) < 4:
+            cx, cy = vue.vers_photo(ev.x, ev.y)       # simple clic : carré centré sur le point
+            if not (0 <= cx < w and 0 <= cy < h):
+                return
+            r = self._cote_pinceau() // 2
+            x1, y1, x2, y2 = cx - r, cy - r, cx + r, cy + r
+        elif abs(ev.x - x0) < 4 or abs(ev.y - y0) < 4:
+            return   # rectangle trop plat : geste involontaire
+        else:
+            (ax, ay), (bx, by) = vue.vers_photo(x0, y0), vue.vers_photo(ev.x, ev.y)
+            x1, x2 = sorted((ax, bx))
+            y1, y2 = sorted((ay, by))
+        m.zones[m.cle].append(an.Zone(int(max(0, x1)), int(max(0, y1)), int(min(w, x2)), int(min(h, y2)),
+                                      "manuel"))
+        self._modifiee()
+
+    def _clic_droit(self, vue, ev):
+        if not self.manuel or self.manuel.bgr is None:
+            return
+        x, y = vue.vers_photo(ev.x, ev.y)
+        zones = self.manuel.zones[self.manuel.cle]
+        dedans = [z for z in zones if z.x1 <= x <= z.x2 and z.y1 <= y <= z.y2]
+        if not dedans:
+            return
+        z = min(dedans, key=lambda q: q.surface())   # la plus petite sous le curseur
+        if z.type == "manuel":
+            zones.remove(z)
+        else:
+            z.actif = not z.actif                    # détection écartée / réactivée
+        self._modifiee()
+
+    def _annuler_zone(self):
+        if not self.manuel:
+            return
+        zones = self.manuel.zones[self.manuel.cle]
+        for z in reversed(zones):
+            if z.type == "manuel":
+                zones.remove(z)
+                self._modifiee()
+                return
+
+    def _terminer_manuel(self):
+        """Écrit toutes les photos (floutées ou recopiées) dans un dossier temporaire puis publie."""
+        m = self.manuel
+        if m is None:
+            return
+        reg = self.reglages()
+        prepa = Path(tempfile.mkdtemp(prefix=PREFIXE_PREPA))
+        self.b_terminer.configure(state="disabled")
+        self.progres.configure(maximum=len(m.cles), value=0)
+        faites, erreurs = [], 0
+        try:
+            for n, cle in enumerate(m.cles, 1):
+                try:
+                    bgr, pil = an.lire_image(m.src / cle)
+                    an.ecrire_image(an.flouter(bgr, m.zones[cle], reg), pil, prepa / cle, reg)
+                    faites.append(cle)
+                except Exception as e:
+                    erreurs += 1
+                    self._ecrire(f"ERREUR {cle} : {e}")
+                self.progres.configure(value=n)
+                self.compteur.configure(text=f"préparation {n} / {len(m.cles)}")
+                self.update()
+            self._publier(m.src, m.sortie, prepa, faites, m.zones)
+        finally:
+            shutil.rmtree(prepa, ignore_errors=True)
+            self.b_terminer.configure(state="normal")
+        if erreurs:
+            messagebox.showwarning("Anonymiseur", f"{erreurs} photo(s) illisible(s) n'ont pas pu être "
+                                   "enregistrée(s).")
+        self._quitter_manuel()
+
+    def _abandonner_manuel(self) -> bool:
+        m = self.manuel
+        if m is None:
+            return True
+        if m.modifiees and not messagebox.askyesno(
+                "Anonymiseur", f"{len(m.modifiees)} photo(s) modifiée(s).\n\nQuitter le mode manuel sans rien "
+                               "copier dans la sortie ?"):
+            return False
+        self._ecrire("Mode manuel abandonné : rien n'a été copié.")
+        self._quitter_manuel()
+        return True
+
+    # ------------------------------------------------------------ clavier
+    def _raccourcis(self):
+        def si_manuel(action):
+            def f(ev):
+                # pas pendant la saisie dans un champ ou le réglage d'un curseur
+                if not self.manuel or isinstance(ev.widget, (tk.Entry, ttk.Entry, tk.Scale, ttk.Combobox)):
+                    return None
+                action()
+                return "break"
+            return f
+        self.bind_all("<Left>", si_manuel(lambda: self._aller(-1)))
+        self.bind_all("<Right>", si_manuel(lambda: self._aller(1)))
+        self.bind_all("<Up>", si_manuel(lambda: self._taille_pinceau(1)))
+        self.bind_all("<Down>", si_manuel(lambda: self._taille_pinceau(-1)))
+        self.bind_all("<Control-z>", si_manuel(self._annuler_zone))
 
     def _fermer(self):
         self._memoriser()
+        if self.manuel and self.manuel.modifiees:
+            rep = messagebox.askyesnocancel(
+                "Anonymiseur", "Mode manuel en cours avec des modifications.\n\nOui : enregistrer toutes les "
+                               "photos dans la sortie puis quitter.\nNon : quitter sans rien copier.\n"
+                               "Annuler : revenir.")
+            if rep is None:
+                return
+            if rep:
+                self._terminer_manuel()
         if self.fil and self.fil.is_alive():
             if not messagebox.askyesno("Anonymiseur", "Un traitement est en cours. Le quitter ? "
                                        "Rien ne sera copié dans la sortie."):
                 return
             self.abandon = True
+        if self.chargeur:
+            self.chargeur.arreter()
         self.arreter.set()
         self.destroy()
+
+
+def _vers_pil(bgr):
+    return Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+
+
+def _meme_zone(a, b) -> bool:
+    ix = max(0, min(a.x2, b.x2) - max(a.x1, b.x1))
+    iy = max(0, min(a.y2, b.y2) - max(a.y1, b.y1))
+    inter = ix * iy
+    union = a.surface() + b.surface() - inter
+    return union > 0 and inter / union > 0.5
 
 
 PREFIXE_PREPA = "anonymiseur_encours_"
@@ -681,371 +1067,6 @@ def _nettoyer_preparations():
                 shutil.rmtree(d, ignore_errors=True)
         except OSError:
             pass
-
-
-def _meme_zone(a: an.Zone, b: an.Zone) -> bool:
-    ix = max(0, min(a.x2, b.x2) - max(a.x1, b.x1))
-    iy = max(0, min(a.y2, b.y2) - max(a.y1, b.y1))
-    inter = ix * iy
-    union = a.surface() + b.surface() - inter
-    return union > 0 and inter / union > 0.5
-
-
-class FenetreVerification(tk.Toplevel):
-    """Contrôle photo par photo.
-
-    Clic gauche : flouter un carré centré sur le clic (taille : molette).
-    Clic gauche + glisser : flouter le rectangle tracé.
-    Clic droit sur une zone : l'écarter (faux positif) ou la réactiver ;
-    une zone ajoutée à la main est supprimée. Ctrl+Z : annuler le dernier ajout.
-
-    Mode vérification : photos déjà traitées, chaque modification est écrite aussitôt.
-    Mode manuel (`manuel=True`) : toutes les photos du dossier, défilement aux
-    flèches ; rien n'est écrit avant « Terminer et enregistrer » (toutes les photos
-    sont alors copiées dans la sortie). Abandon / fermeture : rien sans accord.
-    """
-
-    def __init__(self, maitre: Application, src: Path, sortie: Path, zones: dict, reglages: an.Reglages,
-                 manuel: bool = False, photos: list[Path] | None = None):
-        super().__init__(maitre)
-        self.manuel = manuel
-        self.title("Mode manuel — flouter au clic" if manuel else "Vérifier / corriger l'anonymisation")
-        self.geometry("1200x800")
-        self.src, self.sortie, self.zones, self.reg = src, sortie, zones, reglages
-        if manuel:
-            self.cles = [p.relative_to(src).as_posix() for p in photos or []]
-            for k in self.cles:
-                self.zones.setdefault(k, [])
-        else:
-            self.cles = sorted(k for k in zones if (src / k).exists())
-        self.indice = 0
-        self.bgr = self.pil = None
-        self.echelle = 1.0
-        self.debut = None
-        self.vues: set[str] = set()
-        self.modifiees: set[str] = set()
-        self.taille = 0.10          # côté du carré flouté au clic, fraction du petit côté de la photo
-        self.souris = None
-        self.v_apercu = tk.BooleanVar(value=manuel)
-
-        gauche = ttk.Frame(self)
-        gauche.pack(side="left", fill="y")
-        self.liste = tk.Listbox(gauche, width=38, exportselection=False)
-        self.liste.pack(side="left", fill="y")
-        barre = ttk.Scrollbar(gauche, command=self.liste.yview)
-        barre.pack(side="left", fill="y")
-        self.liste.configure(yscrollcommand=barre.set)
-        self.liste.bind("<<ListboxSelect>>", lambda e: self._choisir())
-
-        droite = ttk.Frame(self)
-        droite.pack(side="left", fill="both", expand=True)
-        haut = ttk.Frame(droite)
-        haut.pack(fill="x")
-        enreg = " Rien n'est écrit avant « Terminer et enregistrer »." if manuel else ""
-        bulle(ttk.Button(haut, text="◀ Précédente", command=lambda: self._aller(-1)),
-              "Photo précédente (flèche ←)." + enreg).pack(side="left", padx=4, pady=4)
-        bulle(ttk.Button(haut, text="Suivante ▶", command=lambda: self._aller(1)),
-              "Photo suivante (flèche →)." + enreg).pack(side="left", padx=4)
-        bulle(ttk.Button(haut, text="Annuler (Ctrl+Z)", command=self._annuler),
-              "Retirer la dernière zone ajoutée à la main sur cette photo.").pack(side="left", padx=4)
-        bulle(ttk.Checkbutton(haut, text="Voir le résultat flouté", variable=self.v_apercu,
-                              command=self._afficher),
-              "Coché : l'image montre le résultat tel qu'il sera enregistré.\nDécoché : la photo d'origine, "
-              "avec seulement les cadres des zones.").pack(side="left", padx=12)
-        if manuel:
-            bulle(ttk.Button(haut, text="Abandonner", command=self._abandonner),
-                  "Fermer sans rien copier dans la sortie (confirmation demandée).").pack(side="right", padx=4)
-            self.b_terminer = bulle(ttk.Button(haut, text="Terminer et enregistrer", command=self._terminer),
-                                    "Écrire maintenant dans la sortie TOUTES les photos du dossier (floutées ou "
-                                    "simplement recopiées) et le fichier des zones, puis fermer.")
-            self.b_terminer.pack(side="right", padx=4)
-        texte_aide(droite, AIDE_MANUEL if manuel else AIDE_VERIFICATION).pack(fill="x", padx=6, pady=(0, 4))
-        bulle(self.liste, "Cliquer sur une photo pour l'afficher. Entre parenthèses : nombre de zones floutées. "
-                          + ("✓ = vue, orange = pas encore vue, * = modifiée (enregistrée à la fin)." if manuel
-                             else "En orange : aucune zone floutée, à vérifier."))
-        self.info = ttk.Label(droite, text="")
-        self.info.pack(fill="x", padx=4)
-        if manuel:
-            ligne = ttk.Frame(droite)
-            ligne.pack(fill="x", padx=4, pady=2)
-            self.compteur = ttk.Label(ligne, text="", anchor="e")
-            self.compteur.pack(side="right", padx=(8, 0))
-            self.progres = bulle(ttk.Progressbar(ligne, mode="determinate", maximum=max(1, len(self.cles))),
-                                 "Photos vues / nombre total de photos du dossier ; à la fin, avancement "
-                                 "de l'enregistrement.")
-            self.progres.pack(side="left", fill="x", expand=True)
-        self.canevas = tk.Canvas(droite, background="#202020", highlightthickness=0, cursor="crosshair")
-        self.canevas.pack(fill="both", expand=True)
-        self.canevas.bind("<Configure>", lambda e: self._afficher())
-        self.canevas.bind("<ButtonPress-1>", self._presser)
-        self.canevas.bind("<B1-Motion>", self._glisser)
-        self.canevas.bind("<ButtonRelease-1>", self._relacher)
-        self.canevas.bind("<Button-3>", self._clic_droit)
-        self.canevas.bind("<Motion>", self._bouger)
-        self.canevas.bind("<Leave>", self._sortir)
-        self.bind("<MouseWheel>", self._molette)
-        self.bind("<Left>", lambda e: self._aller(-1))
-        self.bind("<Right>", lambda e: self._aller(1))
-        self.bind("<Control-z>", lambda e: self._annuler())
-        self.protocol("WM_DELETE_WINDOW", self._fermer)
-
-        self._remplir_liste()
-        self._maj_avancement()
-        if self.cles:
-            self.liste.selection_set(0)
-            self._charger()
-        self.focus_force()
-
-    def _libelle(self, cle):
-        zs = [z for z in self.zones[cle] if z.actif]
-        marque = ""
-        if self.manuel:
-            marque = (" *" if cle in self.modifiees else "") + (" ✓" if cle in self.vues else "")
-        return f"{cle}  ({len(zs)}){marque}"
-
-    def _remplir_liste(self):
-        self.liste.delete(0, "end")
-        for i, k in enumerate(self.cles):
-            self.liste.insert("end", self._libelle(k))
-            self._colorer(i)
-
-    def _colorer(self, i):
-        # vérification : rien flouté = à regarder ; manuel : pas encore vue
-        if self.manuel:
-            self.liste.itemconfigure(i, foreground="" if self.cles[i] in self.vues else "#c07000")
-        elif not any(z.actif for z in self.zones[self.cles[i]]):
-            self.liste.itemconfigure(i, foreground="#c07000")
-
-    def _maj_avancement(self):
-        if not self.manuel:
-            return
-        self.progres.configure(maximum=max(1, len(self.cles)), value=len(self.vues))
-        self.compteur.configure(text=f"{len(self.vues)} / {len(self.cles)} vues")
-
-    def _maj_ligne(self, i):
-        self.liste.delete(i)
-        self.liste.insert(i, self._libelle(self.cles[i]))
-        self._colorer(i)
-        if i == self.indice:
-            self.liste.selection_set(i)
-
-    def _choisir(self):
-        sel = self.liste.curselection()
-        if sel and sel[0] != self.indice:
-            self._aller_a(sel[0])
-
-    def _aller(self, pas):
-        if self.cles:
-            self._aller_a(max(0, min(len(self.cles) - 1, self.indice + pas)))
-
-    def _aller_a(self, i):
-        if i != self.indice:
-            self._quitter_photo()
-            self.indice = i
-            self._charger()
-        self.liste.selection_clear(0, "end")
-        self.liste.selection_set(self.indice)
-        self.liste.see(self.indice)
-
-    def _quitter_photo(self):
-        """Rien n'est écrit en changeant de photo (mode manuel : tout à la fin)."""
-
-    def _fermer(self):
-        if not self.manuel:
-            self.destroy()
-            return
-        if not self.modifiees and all(an.chemin_sortie(self.src / k, self.src, self.sortie).exists()
-                                      for k in self.cles):
-            self.destroy()   # rien de nouveau : la sortie est déjà complète
-            return
-        rep = messagebox.askyesnocancel(
-            "Mode manuel", "Enregistrer maintenant dans la sortie toutes les photos du dossier "
-                           f"({len(self.cles)}) ?\n\nOui : enregistrer puis fermer.\nNon : fermer sans rien "
-                           "copier.\nAnnuler : revenir aux photos.", parent=self)
-        if rep is None:
-            return
-        if rep:
-            self._enregistrer_tout()
-        self.destroy()
-
-    def _terminer(self):
-        self._enregistrer_tout()
-        self.destroy()
-
-    def _abandonner(self):
-        if self.modifiees and not messagebox.askyesno(
-                "Mode manuel", f"{len(self.modifiees)} photo(s) modifiée(s).\n\nFermer sans rien copier "
-                               "dans la sortie ?", parent=self):
-            return
-        self.destroy()
-
-    def _enregistrer_tout(self):
-        """Écrit dans la sortie toutes les photos du dossier (floutées ou recopiées) et les zones.
-        Les photos déjà présentes et non modifiées ne sont pas réécrites."""
-        a_ecrire = [k for k in self.cles if k in self.modifiees
-                    or not an.chemin_sortie(self.src / k, self.src, self.sortie).exists()]
-        self.b_terminer.configure(state="disabled")
-        self.progres.configure(maximum=max(1, len(a_ecrire)), value=0)
-        erreurs = 0
-        for n, k in enumerate(a_ecrire, 1):
-            try:
-                bgr, pil = an.lire_image(self.src / k)
-                an.ecrire_image(an.flouter(bgr, self.zones.get(k, []), self.reg), pil,
-                                an.chemin_sortie(self.src / k, self.src, self.sortie), self.reg)
-            except Exception:
-                erreurs += 1   # photo illisible : ignorée, comme en automatique
-            self.progres.configure(value=n)
-            self.compteur.configure(text=f"enregistrement {n} / {len(a_ecrire)}")
-            self.update()
-        zones = an.charger_zones(self.sortie)
-        zones.update({k: v for k, v in self.zones.items() if k in self.cles})
-        an.enregistrer_zones(self.sortie, self.src, zones)
-        self.modifiees.clear()
-        if erreurs:
-            messagebox.showwarning("Mode manuel", f"{erreurs} photo(s) illisible(s) n'ont pas pu être "
-                                   "enregistrée(s).", parent=self)
-
-    def _charger(self):
-        cle = self.cles[self.indice]
-        self.bgr, self.pil = an.lire_image(self.src / cle)
-        if self.manuel:
-            self.vues.add(cle)
-            self._maj_ligne(self.indice)
-            self._maj_avancement()
-        self._afficher()
-
-    def _afficher(self):
-        if self.bgr is None:
-            return
-        cle = self.cles[self.indice]
-        zones = self.zones[cle]
-        cw, ch = max(50, self.canevas.winfo_width()), max(50, self.canevas.winfo_height())
-        h, w = self.bgr.shape[:2]
-        self.echelle = min(cw / w, ch / h)
-        img = an.flouter(self.bgr, zones, self.reg) if self.v_apercu.get() else self.bgr
-        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        petite = Image.fromarray(rgb).resize((max(1, int(w * self.echelle)), max(1, int(h * self.echelle))))
-        self._photo = ImageTk.PhotoImage(petite)
-        self.canevas.delete("all")
-        self.canevas.create_image(0, 0, anchor="nw", image=self._photo)
-        e = self.echelle
-        for z in zones:
-            coul = COULEURS.get(z.type, "#ffffff")
-            self.canevas.create_rectangle(z.x1 * e, z.y1 * e, z.x2 * e, z.y2 * e, outline=coul, width=2,
-                                          dash=() if z.actif else (4, 4))
-        nv = sum(z.type == "visage" and z.actif for z in zones)
-        npl = sum(z.type == "plaque" and z.actif for z in zones)
-        nm = sum(z.type == "manuel" for z in zones)
-        nx = sum(not z.actif for z in zones)
-        etat = ""
-        if self.manuel and cle in self.modifiees:
-            etat = " — modifiée (enregistrée à la fin)"
-        self.info.configure(text=f"{self.indice + 1}/{len(self.cles)} — {cle} : {nv} visage(s) (rouge), "
-                                 f"{npl} plaque(s) (bleu), {nm} ajoutée(s) (vert), {nx} écartée(s) (pointillés)"
-                                 f" · pinceau {self.taille:.0%}{etat}")
-        self._dessiner_pinceau()
-
-    def _vers_image(self, ev):
-        return int(ev.x / self.echelle), int(ev.y / self.echelle)
-
-    def _cote_pinceau(self) -> int:
-        """Côté du carré flouté au clic, en pixels de la photo."""
-        return max(8, int(min(self.bgr.shape[:2]) * self.taille))
-
-    def _dessiner_pinceau(self):
-        self.canevas.delete("pinceau")
-        if self.souris is None or self.bgr is None or self.debut is not None:
-            return
-        x, y = self.souris
-        r = self._cote_pinceau() * self.echelle / 2
-        self.canevas.create_rectangle(x - r, y - r, x + r, y + r, outline="#ffff40", dash=(3, 3), tags="pinceau")
-
-    def _bouger(self, ev):
-        self.souris = (ev.x, ev.y)
-        self._dessiner_pinceau()
-
-    def _sortir(self, ev):
-        self.souris = None
-        self.canevas.delete("pinceau")
-
-    def _molette(self, ev):
-        if self.souris is None:
-            return   # souris hors de l'image (sur la liste : défilement normal)
-        self.taille = min(0.6, max(0.02, self.taille * (1.15 if ev.delta > 0 else 1 / 1.15)))
-        self._afficher()
-
-    def _presser(self, ev):
-        self.debut = (ev.x, ev.y)
-        self.canevas.delete("trace")
-        self.canevas.delete("pinceau")
-
-    def _glisser(self, ev):
-        if self.debut:
-            self.canevas.delete("trace")
-            self.canevas.create_rectangle(*self.debut, ev.x, ev.y, outline=COULEURS["manuel"], width=2, tags="trace")
-
-    def _relacher(self, ev):
-        if not self.debut or self.bgr is None:
-            return
-        x0, y0 = self.debut
-        self.debut = None
-        self.canevas.delete("trace")
-        h, w = self.bgr.shape[:2]
-        e = self.echelle
-        if abs(ev.x - x0) < 4 and abs(ev.y - y0) < 4:
-            # simple clic : carré centré sur le point cliqué
-            cx, cy = self._vers_image(ev)
-            if not (0 <= cx < w and 0 <= cy < h):
-                return
-            r = self._cote_pinceau() // 2
-            x1, y1, x2, y2 = cx - r, cy - r, cx + r, cy + r
-        elif abs(ev.x - x0) < 4 or abs(ev.y - y0) < 4:
-            return   # rectangle trop plat : geste involontaire
-        else:
-            x1, x2 = sorted((int(x0 / e), int(ev.x / e)))
-            y1, y2 = sorted((int(y0 / e), int(ev.y / e)))
-        self.zones[self.cles[self.indice]].append(
-            an.Zone(max(0, x1), max(0, y1), min(w, x2), min(h, y2), "manuel"))
-        self._sauver()
-
-    def _annuler(self):
-        zones = self.zones[self.cles[self.indice]] if self.cles else []
-        for z in reversed(zones):
-            if z.type == "manuel":
-                zones.remove(z)
-                self._sauver()
-                return
-
-    def _clic_droit(self, ev):
-        x, y = self._vers_image(ev)
-        zones = self.zones[self.cles[self.indice]]
-        dedans = [z for z in zones if z.x1 <= x <= z.x2 and z.y1 <= y <= z.y2]
-        if not dedans:
-            return
-        z = min(dedans, key=lambda q: q.surface())   # la plus petite sous le curseur
-        if z.type == "manuel":
-            zones.remove(z)
-        else:
-            z.actif = not z.actif
-        self._sauver()
-
-    def _sauver(self):
-        """Après une modification : écriture aussitôt (vérification) ou au changement de photo (manuel)."""
-        if self.manuel:
-            self.modifiees.add(self.cles[self.indice])
-        else:
-            self._ecrire_photo()
-        self._maj_ligne(self.indice)
-        self.liste.selection_set(self.indice)
-        self._afficher()
-
-    def _ecrire_photo(self):
-        """Mode vérification : la photo corrigée est réécrite aussitôt."""
-        cle = self.cles[self.indice]
-        an.ecrire_image(an.flouter(self.bgr, self.zones[cle], self.reg), self.pil,
-                        an.chemin_sortie(self.src / cle, self.src, self.sortie), self.reg)
-        an.enregistrer_zones(self.sortie, self.src, self.zones)
-        self._maj_ligne(self.indice)
 
 
 if __name__ == "__main__":

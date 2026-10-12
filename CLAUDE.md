@@ -9,6 +9,8 @@
   rediriger aussi `anonymisation.DOSSIER_ZONES` (ancien emplacement des zones, %LOCALAPPDATA%),
   remplacer `messagebox.show*`, fenêtres invisibles (`attributes('-alpha', 0)`), pas de capture d'écran.
 - Code : `anonymisation.py` (détection, floutage, fichiers), `anonymiseur.py` (interface Tkinter),
+  `onedrive.py` (disponibilité / téléchargement des photos OneDrive),
   `dependances.py` (contrôle/installation, bibliothèque standard uniquement : ne pas y importer cv2/PIL).
   Dans `anonymiseur.py`, cv2/PIL/anonymisation sont chargés par `charger_modules()`, jamais en tête de fichier.
-- Sortie (demandes de l'utilisateur, 2026-10-12) : TOUTES les photos source en JPG (floutées ou recopiées) + `zones_anonymisation.json`. Rien n'est copié dans la sortie avant la fin ; en cas d'arrêt / abandon, rien n'est copié sans accord explicite. Le mode manuel n'enregistre qu'à la fin. L'aperçu à droite de la fenêtre principale montre le résultat pendant le traitement.
+- Demandes de l'utilisateur (2026-10-12) : une seule fenêtre, original à gauche / résultat à droite, en automatique (défilement visible) comme en manuel (bandeau rouge « Cliquez sur la zone à flouter », ← → photos, ↑ ↓ taille du carré). Sortie = TOUTES les photos source en JPG + `zones_anonymisation.json` ; une nouvelle exécution efface d'abord la précédente ; rien n'est copié avant la fin, ni sans accord en cas d'arrêt / abandon. Point rouge / vert à côté du dossier = photos OneDrive pas encore / toutes téléchargées (`onedrive.py`).
+- Lenteur : Windows 11 bride le processus (EcoQoS) → `anonymisation.desactiver_bridage_windows()` ; ne pas l'enlever (8,5 s → 1,6 s par photo sur i9-13900).
