@@ -119,8 +119,9 @@ def texte_aide(parent, texte: str):
 
 AIDE_PRINCIPALE = (
     "Ce programme floute automatiquement les visages et les plaques d'immatriculation des photos JPG d'un "
-    "dossier. Les originaux ne sont jamais modifiés : les photos anonymisées sont écrites dans le dossier de "
-    "sortie.\n"
+    "dossier. Les originaux ne sont jamais modifiés. Le dossier de sortie reçoit TOUTES les photos en JPG : "
+    "floutées quand il y a un visage ou une plaque, sinon simplement recopiées (compressées selon la qualité "
+    "JPG choisie).\n"
     "1) Choisissez le dossier des photos.  2) Réglez les options.  3) Cliquez sur « Anonymiser » pour la "
     "détection automatique, puis contrôlez le résultat avec « Vérifier / corriger… ». Ou bien utilisez "
     "« Mode manuel… » pour faire défiler les photos et flouter vous-même au clic.\n"
@@ -147,7 +148,9 @@ AIDE_MANUEL = (
     "Clic sur l'image : flouter un carré centré sur le clic (cadre jaune, taille réglable à la molette).  "
     "Glisser : flouter un rectangle.  Clic droit sur une zone : la retirer.  Ctrl+Z : annuler le dernier "
     "ajout.\n"
-    "La photo est enregistrée dans la sortie dès que vous passez à une autre photo ou fermez la fenêtre. "
+    "La photo est enregistrée dans la sortie dès que vous passez à une autre photo ou fermez la fenêtre ; "
+    "à la fermeture, les photos non affichées sont recopiées telles quelles : la sortie contient toujours "
+    "toutes les photos. "
     "✓ = photo enregistrée, orange = pas encore enregistrée ; la barre compte les photos enregistrées.")
 
 
@@ -169,7 +172,6 @@ class Application(tk.Tk):
         self.v_sensibilite = tk.IntVar(value=r.get("sensibilite", 3))
         self.v_metadonnees = tk.BooleanVar(value=r.get("supprimer_metadonnees", True))
         self.v_deja = tk.BooleanVar(value=r.get("ignorer_deja_faites", False))
-        self.v_copier = tk.BooleanVar(value=r.get("copier_sans_zone", True))
         self.v_qualite = tk.IntVar(value=r.get("qualite_jpeg", 92))
 
         self.file_messages: queue.Queue = queue.Queue()
@@ -244,17 +246,12 @@ class Application(tk.Tk):
                               variable=self.v_deja),
               "Pour reprendre un traitement interrompu : les photos déjà présentes dans la sortie ne sont "
               "pas retraitées.").grid(row=5, column=0, columnspan=3, sticky="w", **pad)
-        bulle(ttk.Checkbutton(opt, text="Enregistrer aussi les photos sans floutage (le dossier de sortie "
-                                        "contient toutes les photos)", variable=self.v_copier),
-              "Coché : les photos où rien n'est flouté sont aussi recopiées dans la sortie, avec la qualité "
-              "JPG choisie.\nDécoché : seules les photos floutées sont écrites.").grid(
-            row=6, column=0, columnspan=3, sticky="w", **pad)
-        ttk.Label(opt, text="Qualité JPG enregistrée :").grid(row=7, column=0, sticky="w", **pad)
+        ttk.Label(opt, text="Qualité JPG enregistrée :").grid(row=6, column=0, sticky="w", **pad)
         bulle(tk.Scale(opt, from_=50, to=100, orient="horizontal", variable=self.v_qualite, length=180),
               "Compression des JPG écrits dans la sortie (photos floutées et recopiées). 92 par défaut ; "
-              "plus bas = fichiers plus légers mais qualité moindre.").grid(row=7, column=1, sticky="w", **pad)
+              "plus bas = fichiers plus légers mais qualité moindre.").grid(row=6, column=1, sticky="w", **pad)
         ttk.Label(opt, text="(100 = meilleure qualité, fichiers plus lourds ; 85-95 conseillé)",
-                  foreground="gray").grid(row=7, column=2, sticky="w", **pad)
+                  foreground="gray").grid(row=6, column=2, sticky="w", **pad)
 
         bas = ttk.Frame(page)
         bas.pack(fill="x", **pad)
@@ -413,7 +410,7 @@ class Application(tk.Tk):
             seuil_plaque={1: 0.6, 2: 0.45, 3: 0.30, 4: 0.20, 5: 0.12}[s],
             methode=self.v_methode.get(), force=self.v_force.get(),
             supprimer_metadonnees=self.v_metadonnees.get(),
-            qualite_jpeg=self.v_qualite.get(), copier_sans_zone=self.v_copier.get())
+            qualite_jpeg=self.v_qualite.get())
 
     def _memoriser(self):
         ecrire_reglages({
@@ -422,16 +419,19 @@ class Application(tk.Tk):
             "plaques": self.v_plaques.get(), "methode": self.v_methode.get(),
             "force": self.v_force.get(), "sensibilite": self.v_sensibilite.get(),
             "supprimer_metadonnees": self.v_metadonnees.get(), "ignorer_deja_faites": self.v_deja.get(),
-            "copier_sans_zone": self.v_copier.get(), "qualite_jpeg": self.v_qualite.get()})
+            "qualite_jpeg": self.v_qualite.get()})
 
     def _dossiers(self) -> tuple[Path, Path] | None:
-        src = Path(self.v_source.get().strip())
-        if not src.is_dir():
+        texte = self.v_source.get().strip()
+        src = Path(texte).resolve() if texte else None   # Path("") = dossier courant : à refuser
+        if src is None or not src.is_dir():
             messagebox.showerror("Anonymiseur", "Choisissez un dossier de photos existant.")
             return None
-        if not self.v_sortie.get().strip():
-            self.v_sortie.set(str(src / NOM_SORTIE))
-        sortie = Path(self.v_sortie.get().strip())
+        sortie = Path(self.v_sortie.get().strip() or NOM_SORTIE)
+        if not sortie.is_absolute():   # « anonymisé » seul = sous-dossier de la source
+            sortie = src / sortie
+        sortie = sortie.resolve()
+        self.v_sortie.set(str(sortie))
         if sortie.resolve() == src.resolve():
             messagebox.showerror("Anonymiseur", "Le dossier de sortie doit être différent du dossier "
                                  "des photos : les originaux ne doivent pas être écrasés.")
@@ -496,13 +496,12 @@ class Application(tk.Tk):
                     zones_toutes[cle] = zones
                     v = sum(z.type == "visage" and z.actif for z in zones)
                     pl = sum(z.type == "plaque" and z.actif for z in zones)
-                    if any(z.actif for z in zones) or reg.copier_sans_zone:
-                        an.ecrire_image(an.flouter(bgr, zones, reg), pil, dest, reg)
-                        nb_v += v
-                        nb_p += pl
-                        msg(("log", f"{cle} : {v} visage(s), {pl} plaque(s)"))
-                    else:
-                        msg(("log", f"{cle} : rien à flouter, non enregistrée"))
+                    # toutes les photos vont dans la sortie : floutées ou simplement recompressées
+                    an.ecrire_image(an.flouter(bgr, zones, reg), pil, dest, reg)
+                    nb_v += v
+                    nb_p += pl
+                    msg(("log", f"{cle} : {v} visage(s), {pl} plaque(s)" if v or pl
+                         else f"{cle} : rien à flouter, recopiée"))
                 except Exception as e:  # une photo illisible ne bloque pas les autres
                     nb_err += 1
                     msg(("log", f"ERREUR {cle} : {e}"))
@@ -749,29 +748,27 @@ class FenetreVerification(tk.Toplevel):
         if not self.manuel or self.bgr is None:
             return
         cle = self.cles[self.indice]
-        existe = an.chemin_sortie(self.src / cle, self.src, self.sortie).exists()
-        a_flouter = any(z.actif for z in self.zones[cle])
-        if self.modifie or (not existe and (self.reg.copier_sans_zone or a_flouter)):
+        if self.modifie or not an.chemin_sortie(self.src / cle, self.src, self.sortie).exists():
             self._ecrire_photo()
         self.modifie = False
 
     def _fermer(self):
         try:
             self._quitter_photo()
-            if self.manuel and self.reg.copier_sans_zone:
+            if self.manuel:
                 self._recopier_restantes()
         finally:
             self.destroy()
 
     def _recopier_restantes(self):
-        """Photos jamais affichées : proposer de les recopier (avec leurs zones éventuelles)."""
+        """Photos jamais affichées : recopiées dans la sortie (avec leurs zones éventuelles),
+        pour que la sortie contienne toutes les photos du dossier."""
         if self.faites is None:
             self._maj_avancement()
         restantes = [k for k in self.cles if k not in self.faites]
-        if not restantes or not messagebox.askyesno(
-                "Mode manuel", f"{len(restantes)} photo(s) pas encore enregistrée(s) dans la sortie.\n\n"
-                               "Les recopier maintenant (sans autre floutage que celui déjà défini) ?", parent=self):
+        if not restantes:
             return
+        self.info.configure(text=f"Recopie des {len(restantes)} photo(s) non affichée(s) dans la sortie…")
         for k in restantes:
             try:
                 bgr, pil = an.lire_image(self.src / k)

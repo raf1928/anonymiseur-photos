@@ -24,11 +24,11 @@ Chaque fenêtre affiche un texte explicatif en haut ; survoler un bouton ou un r
 1. **Choisir…** le dossier des photos. La sortie est proposée dans `<dossier>\anonymisé`.
 2. Options : visages / plaques, méthode (`flou`, `pixels`, `noir`), force, sensibilité,
    sous-dossiers, suppression des métadonnées.
-   - **Enregistrer aussi les photos sans floutage** (coché par défaut) : le dossier de sortie contient
-     toutes les photos, modifiées ou non. Décoché : seules les photos floutées y sont écrites.
    - **Qualité JPG enregistrée** (curseur 50 à 100, 92 par défaut) : s'applique à toutes les photos
      écrites dans la sortie ; plus bas = fichiers plus légers.
-3. **Anonymiser**. Les originaux ne sont **jamais modifiés**.
+3. **Anonymiser**. Les originaux ne sont **jamais modifiés**. Le dossier de sortie reçoit **toutes** les
+   photos du dossier source, en JPG uniquement : floutées s'il y a un visage ou une plaque, sinon
+   simplement recopiées (recompressées selon la qualité JPG choisie).
 4. **Vérifier / corriger…** : contrôle photo par photo.
    - clic : flouter un carré (taille à la molette) ; glisser : ajouter un rectangle (vert) ;
    - clic droit sur une zone : l'écarter (fausse détection) ou la réactiver ; une zone ajoutée est supprimée ;
@@ -36,7 +36,8 @@ Chaque fenêtre affiche un texte explicatif en haut ; survoler un bouton ou un r
    - les photos sans aucune zone floutée apparaissent en orange dans la liste.
 
    Chaque correction réécrit aussitôt la photo anonymisée. Les corrections sont mémorisées dans
-   `anonymisé\zones_anonymisation.json` et conservées si l'on relance l'anonymisation.
+   `%LOCALAPPDATA%\anonymiseur_photos\zones\` (hors du dossier de sortie, qui ne contient que des JPG)
+   et conservées si l'on relance l'anonymisation.
 
 ### Mode manuel
 
@@ -49,8 +50,8 @@ Bouton **Mode manuel…** : toutes les photos du dossier défilent, sans détect
 - la photo est **enregistrée dès qu'on passe à une autre** (ou qu'on ferme la fenêtre), même sans zone :
   on obtient alors une copie sans métadonnées. Les photos enregistrées portent ✓ dans la liste,
   les autres sont en orange.
-- en fermant, si des photos n'ont pas été affichées, le programme propose de les recopier dans la sortie
-  (option « Enregistrer aussi les photos sans floutage » cochée). Décochée : une photo sans zone n'est pas écrite.
+- en fermant, les photos qui n'ont pas été affichées sont recopiées automatiquement : la sortie contient
+  toujours toutes les photos du dossier.
 
 Les deux modes partagent les mêmes zones : on peut lancer l'automatique puis compléter en manuel.
 

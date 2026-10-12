@@ -10,6 +10,7 @@ sinon les petits visages / plaques lointaines disparaissent à la réduction.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import asdict, dataclass
@@ -23,7 +24,8 @@ DOSSIER_MODELES = Path(__file__).resolve().parent / "modeles"
 MODELE_VISAGE = DOSSIER_MODELES / "face_detection_yunet_2023mar.onnx"
 MODELE_PLAQUE = "yolo-v9-s-608-license-plate-end2end"
 EXTENSIONS = {".jpg", ".jpeg"}
-FICHIER_ZONES = "zones_anonymisation.json"
+FICHIER_ZONES = "zones_anonymisation.json"   # emplacement des anciennes versions (dans la sortie)
+DOSSIER_ZONES = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "anonymiseur_photos" / "zones"
 
 
 @dataclass
@@ -51,7 +53,6 @@ class Reglages:
     marge: float = 0.20          # agrandissement des zones (fraction de la taille)
     supprimer_metadonnees: bool = True
     qualite_jpeg: int = 92
-    copier_sans_zone: bool = True   # enregistrer aussi les photos où rien n'est flouté
 
 
 # --------------------------------------------------------------------------- #
@@ -232,18 +233,32 @@ def lister_photos(dossier: Path, sous_dossiers: bool, exclure: Path | None = Non
     return sorted(photos)
 
 
+def fichier_zones(dossier_sortie: Path) -> Path:
+    """Zones mémorisées (pour Vérifier / corriger), rangées HORS du dossier de sortie :
+    celui-ci ne doit contenir que les photos JPG anonymisées."""
+    cle = hashlib.sha1(str(Path(dossier_sortie).resolve()).lower().encode("utf-8")).hexdigest()[:16]
+    return DOSSIER_ZONES / f"{cle}.json"
+
+
 def charger_zones(dossier_sortie: Path) -> dict[str, list[Zone]]:
-    f = dossier_sortie / FICHIER_ZONES
+    f = fichier_zones(dossier_sortie)
     if not f.exists():
-        return {}
+        f = Path(dossier_sortie) / FICHIER_ZONES   # ancienne version : fichier dans la sortie
+        if not f.exists():
+            return {}
     data = json.loads(f.read_text(encoding="utf-8"))
     return {k: [Zone(**z) for z in v] for k, v in data.get("photos", {}).items()}
 
 
 def enregistrer_zones(dossier_sortie: Path, source: Path, zones: dict[str, list[Zone]]) -> None:
-    dossier_sortie.mkdir(parents=True, exist_ok=True)
-    data = {"source": str(source), "photos": {k: [asdict(z) for z in v] for k, v in zones.items()}}
-    (dossier_sortie / FICHIER_ZONES).write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    f = fichier_zones(dossier_sortie)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    data = {"source": str(source), "sortie": str(Path(dossier_sortie).resolve()),
+            "photos": {k: [asdict(z) for z in v] for k, v in zones.items()}}
+    f.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    ancien = Path(dossier_sortie) / FICHIER_ZONES
+    if ancien.exists():   # migration : la sortie ne garde que des JPG
+        ancien.unlink()
 
 
 def chemin_sortie(photo: Path, source: Path, dossier_sortie: Path) -> Path:
