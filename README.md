@@ -26,9 +26,13 @@ Chaque fenêtre affiche un texte explicatif en haut ; survoler un bouton ou un r
    sous-dossiers, suppression des métadonnées.
    - **Qualité JPG enregistrée** (curseur 50 à 100, 92 par défaut) : s'applique à toutes les photos
      écrites dans la sortie ; plus bas = fichiers plus légers.
-3. **Anonymiser**. Les originaux ne sont **jamais modifiés**. Le dossier de sortie reçoit **toutes** les
-   photos du dossier source, en JPG uniquement : floutées s'il y a un visage ou une plaque, sinon
-   simplement recopiées (recompressées selon la qualité JPG choisie).
+3. **Anonymiser**. Les originaux ne sont **jamais modifiés**. Le panneau **Aperçu du résultat** (à droite)
+   montre chaque photo floutée pendant le traitement. Les photos sont préparées dans un dossier temporaire
+   et ne sont copiées dans la sortie **qu'à la fin**. Si l'on clique **Arrêter**, le programme demande s'il
+   faut copier les photos déjà traitées ; sinon **rien n'est copié**.
+   La sortie reçoit alors **toutes** les photos du dossier source en JPG (floutées s'il y a un visage ou une
+   plaque, sinon simplement recopiées et recompressées selon la qualité JPG choisie) et le fichier
+   `zones_anonymisation.json`, qui mémorise les zones floutées de chaque photo.
 4. **Vérifier / corriger…** : contrôle photo par photo.
    - clic : flouter un carré (taille à la molette) ; glisser : ajouter un rectangle (vert) ;
    - clic droit sur une zone : l'écarter (fausse détection) ou la réactiver ; une zone ajoutée est supprimée ;
@@ -36,8 +40,7 @@ Chaque fenêtre affiche un texte explicatif en haut ; survoler un bouton ou un r
    - les photos sans aucune zone floutée apparaissent en orange dans la liste.
 
    Chaque correction réécrit aussitôt la photo anonymisée. Les corrections sont mémorisées dans
-   `%LOCALAPPDATA%\anonymiseur_photos\zones\` (hors du dossier de sortie, qui ne contient que des JPG)
-   et conservées si l'on relance l'anonymisation.
+   `zones_anonymisation.json` dans le dossier de sortie et conservées si l'on relance l'anonymisation.
 
 ### Mode manuel
 
@@ -47,11 +50,10 @@ Bouton **Mode manuel…** : toutes les photos du dossier défilent, sans détect
 - **clic** sur l'image : floute un carré centré sur le clic (cadre jaune en pointillés = taille) ;
 - **molette** sur l'image : agrandit / réduit ce carré ;
 - glisser : floute le rectangle tracé ; clic droit sur une zone : la retirer ; **Ctrl+Z** : annuler le dernier ajout ;
-- la photo est **enregistrée dès qu'on passe à une autre** (ou qu'on ferme la fenêtre), même sans zone :
-  on obtient alors une copie sans métadonnées. Les photos enregistrées portent ✓ dans la liste,
-  les autres sont en orange.
-- en fermant, les photos qui n'ont pas été affichées sont recopiées automatiquement : la sortie contient
-  toujours toutes les photos du dossier.
+- l'image montre le résultat tel qu'il sera enregistré ; ✓ = photo vue, orange = pas encore vue, * = modifiée ;
+- **rien n'est écrit pendant le défilement**. **Terminer et enregistrer** écrit dans la sortie toutes les
+  photos du dossier (floutées ou recopiées) et le fichier des zones ;
+- **Abandonner**, ou fermer la fenêtre en répondant « Non », ne copie rien.
 
 Les deux modes partagent les mêmes zones : on peut lancer l'automatique puis compléter en manuel.
 

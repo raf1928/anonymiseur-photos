@@ -12,7 +12,9 @@ from __future__ import annotations
 import json
 import os
 import queue
+import shutil
 import sys
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -119,12 +121,13 @@ def texte_aide(parent, texte: str):
 
 AIDE_PRINCIPALE = (
     "Ce programme floute automatiquement les visages et les plaques d'immatriculation des photos JPG d'un "
-    "dossier. Les originaux ne sont jamais modifiés. Le dossier de sortie reçoit TOUTES les photos en JPG : "
-    "floutées quand il y a un visage ou une plaque, sinon simplement recopiées (compressées selon la qualité "
-    "JPG choisie).\n"
-    "1) Choisissez le dossier des photos.  2) Réglez les options.  3) Cliquez sur « Anonymiser » pour la "
-    "détection automatique, puis contrôlez le résultat avec « Vérifier / corriger… ». Ou bien utilisez "
-    "« Mode manuel… » pour faire défiler les photos et flouter vous-même au clic.\n"
+    "dossier. Les originaux ne sont jamais modifiés. Le dossier de sortie reçoit TOUTES les photos en JPG "
+    "(floutées quand il y a un visage ou une plaque, sinon simplement recopiées et compressées selon la "
+    "qualité choisie) ainsi que le fichier zones_anonymisation.json qui mémorise les zones floutées.\n"
+    "1) Choisissez le dossier des photos.  2) Réglez les options.  3) Cliquez sur « Anonymiser » : l'aperçu "
+    "à droite montre le résultat de chaque photo pendant le traitement ; les photos ne sont copiées dans la "
+    "sortie qu'à la fin (si vous arrêtez, rien n'est copié sauf si vous le demandez). Contrôlez ensuite avec "
+    "« Vérifier / corriger… ». Ou bien utilisez « Mode manuel… » pour flouter vous-même au clic.\n"
     "Tout est traité sur cet ordinateur : aucune photo n'est envoyée sur internet. "
     "Survolez un bouton ou un réglage pour afficher son aide.")
 
@@ -144,22 +147,23 @@ AIDE_VERIFICATION = (
     "à regarder en priorité.")
 
 AIDE_MANUEL = (
-    "Mode manuel : toutes les photos du dossier défilent avec les flèches ← →.\n"
+    "Mode manuel : toutes les photos du dossier défilent avec les flèches ← →. L'image montre le résultat tel "
+    "qu'il sera enregistré.\n"
     "Clic sur l'image : flouter un carré centré sur le clic (cadre jaune, taille réglable à la molette).  "
     "Glisser : flouter un rectangle.  Clic droit sur une zone : la retirer.  Ctrl+Z : annuler le dernier "
     "ajout.\n"
-    "La photo est enregistrée dans la sortie dès que vous passez à une autre photo ou fermez la fenêtre ; "
-    "à la fermeture, les photos non affichées sont recopiées telles quelles : la sortie contient toujours "
-    "toutes les photos. "
-    "✓ = photo enregistrée, orange = pas encore enregistrée ; la barre compte les photos enregistrées.")
+    "Rien n'est écrit pendant le défilement : tout est enregistré à la fin, avec « Terminer et enregistrer » "
+    "(toutes les photos du dossier sont alors copiées dans la sortie, floutées ou non). « Abandonner » ou la "
+    "fermeture de la fenêtre ne copient rien sans votre accord. ✓ = photo vue, orange = pas encore vue, "
+    "* = modifiée.")
 
 
 class Application(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Anonymiseur de photos — visages et plaques")
-        self.geometry("820x800")
-        self.minsize(680, 600)
+        self.geometry("1400x820")
+        self.minsize(1100, 600)
         r = lire_reglages()
 
         self.v_source = tk.StringVar(value=r.get("source", ""))
@@ -178,6 +182,9 @@ class Application(tk.Tk):
         self.fil: threading.Thread | None = None
         self.fil_dep: threading.Thread | None = None
         self.arreter = threading.Event()
+        self.abandon = False             # fermeture pendant un traitement : rien n'est copié
+        self._apercu_pil = None
+        self._apercu_tk = None
         self.modules_ok = charger_modules()
         self.onglets = ttk.Notebook(self)
         self.onglets.pack(fill="both", expand=True)
@@ -190,10 +197,23 @@ class Application(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._fermer)
         self.after(100, self._lire_messages)
         self.after(300, self._controle_demarrage)
+        self.after(2000, _nettoyer_preparations)
 
     # ------------------------------------------------------------------ UI
     def _construire(self, page):
         pad = {"padx": 8, "pady": 4}
+        gauche = ttk.Frame(page)
+        gauche.pack(side="left", fill="both")
+        droite = ttk.LabelFrame(page, text="Aperçu du résultat")
+        droite.pack(side="left", fill="both", expand=True, padx=(0, 8), pady=8)
+        self.apercu = bulle(tk.Label(droite, background="#202020", foreground="#c0c0c0",
+                                     text="Le résultat de chaque photo\ns'affiche ici pendant le traitement."),
+                            "Résultat de la photo en cours de traitement, tel qu'il sera enregistré dans la sortie.")
+        self.apercu.pack(fill="both", expand=True, padx=4, pady=4)
+        self.apercu.bind("<Configure>", lambda e: self._dessiner_apercu())
+        self.apercu_titre = ttk.Label(droite, text="")
+        self.apercu_titre.pack(fill="x", padx=4, pady=(0, 4))
+        page = gauche
         texte_aide(page, AIDE_PRINCIPALE).pack(fill="x", padx=10, pady=(8, 2))
         cadre = ttk.LabelFrame(page, text="Dossiers")
         cadre.pack(fill="x", **pad)
@@ -260,8 +280,8 @@ class Application(tk.Tk):
                               "photos floutées dans la sortie.")
         self.b_lancer.pack(side="left", padx=4)
         self.b_arreter = bulle(ttk.Button(bas, text="Arrêter", command=self.arreter.set, state="disabled"),
-                               "Interrompre le traitement après la photo en cours. Les photos déjà faites "
-                               "restent dans la sortie.")
+                               "Interrompre le traitement après la photo en cours. Le programme demande alors "
+                               "s'il faut copier dans la sortie les photos déjà traitées ; sinon rien n'est copié.")
         self.b_arreter.pack(side="left", padx=4)
         self.b_verifier = bulle(ttk.Button(bas, text="Vérifier / corriger…", command=self._verifier),
                                 "Revoir une à une les photos traitées : ajouter une zone oubliée, écarter une "
@@ -269,7 +289,7 @@ class Application(tk.Tk):
         self.b_verifier.pack(side="left", padx=4)
         self.b_manuel = bulle(ttk.Button(bas, text="Mode manuel…", command=self._mode_manuel),
                               "Faire défiler toutes les photos avec les flèches ← → et flouter au clic ; "
-                              "chaque photo est enregistrée quand on passe à la suivante.")
+                              "tout est enregistré à la fin, quand vous cliquez « Terminer et enregistrer ».")
         self.b_manuel.pack(side="left", padx=4)
         bulle(ttk.Button(bas, text="Ouvrir la sortie", command=self._ouvrir_sortie),
               "Ouvrir le dossier de sortie dans l'Explorateur Windows.").pack(side="left", padx=4)
@@ -279,7 +299,7 @@ class Application(tk.Tk):
         self.compteur = ttk.Label(ligne, text="", width=14, anchor="e")
         self.compteur.pack(side="right", padx=(8, 0))
         self.progres = bulle(ttk.Progressbar(ligne, mode="determinate"),
-                             "Avancement du traitement automatique : photos traitées / total.")
+                             "Avancement : photos traitées / total, puis copie dans la sortie à la fin.")
         self.progres.pack(side="left", fill="x", expand=True)
         self.journal = tk.Text(page, height=7, wrap="word", state="disabled")
         self.journal.pack(fill="both", expand=True, **pad)
@@ -396,6 +416,20 @@ class Application(tk.Tk):
         if s and Path(s).is_dir():
             os.startfile(s)
 
+    def _montrer_apercu(self, image, titre: str):
+        self._apercu_pil = image
+        self.apercu_titre.configure(text=titre)
+        self._dessiner_apercu()
+
+    def _dessiner_apercu(self):
+        if self._apercu_pil is None:
+            return
+        w, h = max(50, self.apercu.winfo_width() - 4), max(50, self.apercu.winfo_height() - 4)
+        img = self._apercu_pil.copy()
+        img.thumbnail((w, h))
+        self._apercu_tk = ImageTk.PhotoImage(img)
+        self.apercu.configure(image=self._apercu_tk, text="")
+
     def _ecrire(self, texte: str):
         self.journal.configure(state="normal")
         self.journal.insert("end", texte + "\n")
@@ -462,25 +496,31 @@ class Application(tk.Tk):
         self.b_arreter.configure(state="normal")
         self.progres.configure(maximum=len(photos), value=0)
         self.compteur.configure(text=f"0 / {len(photos)}")
-        self._ecrire(f"{len(photos)} photo(s) à traiter → {sortie}")
-        self.fil = threading.Thread(target=self._traiter, args=(photos, src, sortie, reg, self.v_deja.get()),
-                                    daemon=True)
+        self.abandon = False
+        prepa = Path(tempfile.mkdtemp(prefix=PREFIXE_PREPA))
+        self._ecrire(f"{len(photos)} photo(s) à traiter → {sortie} (copie dans la sortie à la fin)")
+        self.fil = threading.Thread(target=self._traiter,
+                                    args=(photos, src, sortie, prepa, reg, self.v_deja.get()), daemon=True)
         self.fil.start()
 
-    def _traiter(self, photos, src, sortie, reg, ignorer_deja):
+    def _traiter(self, photos, src, sortie, prepa, reg, ignorer_deja):
+        """Fil de traitement. Les photos sont écrites dans `prepa` (dossier temporaire) :
+        rien n'arrive dans la sortie avant la fin, ou avant l'accord de l'utilisateur s'il arrête."""
         msg = self.file_messages.put
         t0 = time.time()
         zones_toutes = an.charger_zones(sortie)
+        faites: list[str] = []
         nb_v = nb_p = nb_err = 0
+        interrompu = False
         try:
             det = an.Detecteur(reg)
             for i, p in enumerate(photos, 1):
                 if self.arreter.is_set():
+                    interrompu = True
                     msg(("log", "Arrêté par l'utilisateur."))
                     break
                 cle = p.relative_to(src).as_posix()
-                dest = an.chemin_sortie(p, src, sortie)
-                if ignorer_deja and dest.exists() and cle in zones_toutes:
+                if ignorer_deja and an.chemin_sortie(p, src, sortie).exists() and cle in zones_toutes:
                     msg(("progres", i))
                     continue
                 try:
@@ -496,27 +536,60 @@ class Application(tk.Tk):
                     zones_toutes[cle] = zones
                     v = sum(z.type == "visage" and z.actif for z in zones)
                     pl = sum(z.type == "plaque" and z.actif for z in zones)
-                    # toutes les photos vont dans la sortie : floutées ou simplement recompressées
-                    an.ecrire_image(an.flouter(bgr, zones, reg), pil, dest, reg)
+                    # toutes les photos iront dans la sortie : floutées ou simplement recompressées
+                    resultat = an.flouter(bgr, zones, reg)
+                    an.ecrire_image(resultat, pil, an.chemin_sortie(p, src, prepa), reg)
+                    faites.append(cle)
                     nb_v += v
                     nb_p += pl
-                    msg(("log", f"{cle} : {v} visage(s), {pl} plaque(s)" if v or pl
-                         else f"{cle} : rien à flouter, recopiée"))
+                    texte = f"{cle} : {v} visage(s), {pl} plaque(s)" if v or pl else f"{cle} : rien à flouter"
+                    vignette = Image.fromarray(cv2.cvtColor(resultat, cv2.COLOR_BGR2RGB))
+                    vignette.thumbnail((1000, 1000))
+                    msg(("apercu", (vignette, f"{i}/{len(photos)} — {texte}")))
+                    msg(("log", texte))
                 except Exception as e:  # une photo illisible ne bloque pas les autres
                     nb_err += 1
                     msg(("log", f"ERREUR {cle} : {e}"))
                 msg(("progres", i))
-                if i % 10 == 0:
-                    an.enregistrer_zones(sortie, src, zones_toutes)
         except Exception as e:
+            interrompu = True
             msg(("log", f"ERREUR : {e}"))
         finally:
-            an.enregistrer_zones(sortie, src, zones_toutes)
-            msg(("log", f"Terminé en {time.time() - t0:.0f} s : {nb_v} visage(s), {nb_p} plaque(s) floutés"
+            msg(("log", f"Traitement terminé en {time.time() - t0:.0f} s : {nb_v} visage(s), {nb_p} plaque(s)"
                         + (f", {nb_err} erreur(s)" if nb_err else "") + "."))
-            msg(("log", "Contrôlez le résultat avec « Vérifier / corriger… » : la détection "
-                        "automatique peut manquer un visage de profil ou une plaque lointaine."))
-            msg(("fin", None))
+            if self.abandon:
+                shutil.rmtree(prepa, ignore_errors=True)
+            msg(("fin", {"src": src, "sortie": sortie, "prepa": prepa, "faites": faites,
+                         "zones": zones_toutes, "interrompu": interrompu}))
+
+    def _terminer_traitement(self, info):
+        """Fin du traitement (fil principal) : copie dans la sortie, ou rien si l'utilisateur refuse."""
+        faites, prepa = info["faites"], info["prepa"]
+        copier = bool(faites)
+        if faites and info["interrompu"]:
+            copier = messagebox.askyesno(
+                "Anonymiseur", f"Traitement interrompu : {len(faites)} photo(s) déjà traitée(s).\n\n"
+                               "Les copier dans le dossier de sortie ?\n(Non : rien n'est copié.)")
+        if copier:
+            sortie = info["sortie"]
+            self.progres.configure(maximum=len(faites), value=0)
+            for n, cle in enumerate(faites, 1):
+                dest = sortie / cle
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(prepa / cle), str(dest))
+                self.progres.configure(value=n)
+                self.compteur.configure(text=f"copie {n} / {len(faites)}")
+                if n % 10 == 0:
+                    self.update()
+            zones = an.charger_zones(sortie)                     # zones déjà présentes dans la sortie
+            zones.update({k: info["zones"][k] for k in faites})  # + celles des photos copiées
+            an.enregistrer_zones(sortie, info["src"], zones)
+            self._ecrire(f"{len(faites)} photo(s) copiée(s) dans {sortie}.")
+            self._ecrire("Contrôlez le résultat avec « Vérifier / corriger… » : la détection automatique "
+                         "peut manquer un visage de profil ou une plaque lointaine.")
+        elif faites:
+            self._ecrire("Rien n'a été copié dans la sortie.")
+        shutil.rmtree(prepa, ignore_errors=True)
 
     def _lire_messages(self):
         try:
@@ -524,6 +597,8 @@ class Application(tk.Tk):
                 genre, val = self.file_messages.get_nowait()
                 if genre == "log":
                     self._ecrire(val)
+                elif genre == "apercu":
+                    self._montrer_apercu(*val)
                 elif genre == "progres":
                     self.progres.configure(value=val)
                     self.compteur.configure(text=f"{val} / {int(self.progres.cget('maximum'))}")
@@ -541,6 +616,8 @@ class Application(tk.Tk):
                                                "en défaut. Si un paquet était déjà chargé, fermez et "
                                                "relancez le programme.")
                 elif genre == "fin":
+                    self.b_arreter.configure(state="disabled")
+                    self._terminer_traitement(val)
                     self.b_lancer.configure(state="normal")
                     self.b_verifier.configure(state="normal")
                     self.b_manuel.configure(state="normal")
@@ -584,8 +661,26 @@ class Application(tk.Tk):
 
     def _fermer(self):
         self._memoriser()
+        if self.fil and self.fil.is_alive():
+            if not messagebox.askyesno("Anonymiseur", "Un traitement est en cours. Le quitter ? "
+                                       "Rien ne sera copié dans la sortie."):
+                return
+            self.abandon = True
         self.arreter.set()
         self.destroy()
+
+
+PREFIXE_PREPA = "anonymiseur_encours_"
+
+
+def _nettoyer_preparations():
+    """Supprime les dossiers temporaires laissés par un traitement abandonné (> 1 h)."""
+    for d in Path(tempfile.gettempdir()).glob(PREFIXE_PREPA + "*"):
+        try:
+            if time.time() - d.stat().st_mtime > 3600:
+                shutil.rmtree(d, ignore_errors=True)
+        except OSError:
+            pass
 
 
 def _meme_zone(a: an.Zone, b: an.Zone) -> bool:
@@ -606,7 +701,8 @@ class FenetreVerification(tk.Toplevel):
 
     Mode vérification : photos déjà traitées, chaque modification est écrite aussitôt.
     Mode manuel (`manuel=True`) : toutes les photos du dossier, défilement aux
-    flèches ; la photo est enregistrée dès qu'on passe à une autre (ou qu'on ferme).
+    flèches ; rien n'est écrit avant « Terminer et enregistrer » (toutes les photos
+    sont alors copiées dans la sortie). Abandon / fermeture : rien sans accord.
     """
 
     def __init__(self, maitre: Application, src: Path, sortie: Path, zones: dict, reglages: an.Reglages,
@@ -626,8 +722,8 @@ class FenetreVerification(tk.Toplevel):
         self.bgr = self.pil = None
         self.echelle = 1.0
         self.debut = None
-        self.modifie = False
-        self.faites: set | None = None
+        self.vues: set[str] = set()
+        self.modifiees: set[str] = set()
         self.taille = 0.10          # côté du carré flouté au clic, fraction du petit côté de la photo
         self.souris = None
         self.v_apercu = tk.BooleanVar(value=manuel)
@@ -645,7 +741,7 @@ class FenetreVerification(tk.Toplevel):
         droite.pack(side="left", fill="both", expand=True)
         haut = ttk.Frame(droite)
         haut.pack(fill="x")
-        enreg = " La photo affichée est enregistrée en la quittant." if manuel else ""
+        enreg = " Rien n'est écrit avant « Terminer et enregistrer »." if manuel else ""
         bulle(ttk.Button(haut, text="◀ Précédente", command=lambda: self._aller(-1)),
               "Photo précédente (flèche ←)." + enreg).pack(side="left", padx=4, pady=4)
         bulle(ttk.Button(haut, text="Suivante ▶", command=lambda: self._aller(1)),
@@ -656,9 +752,16 @@ class FenetreVerification(tk.Toplevel):
                               command=self._afficher),
               "Coché : l'image montre le résultat tel qu'il sera enregistré.\nDécoché : la photo d'origine, "
               "avec seulement les cadres des zones.").pack(side="left", padx=12)
+        if manuel:
+            bulle(ttk.Button(haut, text="Abandonner", command=self._abandonner),
+                  "Fermer sans rien copier dans la sortie (confirmation demandée).").pack(side="right", padx=4)
+            self.b_terminer = bulle(ttk.Button(haut, text="Terminer et enregistrer", command=self._terminer),
+                                    "Écrire maintenant dans la sortie TOUTES les photos du dossier (floutées ou "
+                                    "simplement recopiées) et le fichier des zones, puis fermer.")
+            self.b_terminer.pack(side="right", padx=4)
         texte_aide(droite, AIDE_MANUEL if manuel else AIDE_VERIFICATION).pack(fill="x", padx=6, pady=(0, 4))
         bulle(self.liste, "Cliquer sur une photo pour l'afficher. Entre parenthèses : nombre de zones floutées. "
-                          + ("✓ = enregistrée dans la sortie, orange = pas encore enregistrée." if manuel
+                          + ("✓ = vue, orange = pas encore vue, * = modifiée (enregistrée à la fin)." if manuel
                              else "En orange : aucune zone floutée, à vérifier."))
         self.info = ttk.Label(droite, text="")
         self.info.pack(fill="x", padx=4)
@@ -668,7 +771,8 @@ class FenetreVerification(tk.Toplevel):
             self.compteur = ttk.Label(ligne, text="", anchor="e")
             self.compteur.pack(side="right", padx=(8, 0))
             self.progres = bulle(ttk.Progressbar(ligne, mode="determinate", maximum=max(1, len(self.cles))),
-                                 "Photos déjà enregistrées dans la sortie / nombre total de photos du dossier.")
+                                 "Photos vues / nombre total de photos du dossier ; à la fin, avancement "
+                                 "de l'enregistrement.")
             self.progres.pack(side="left", fill="x", expand=True)
         self.canevas = tk.Canvas(droite, background="#202020", highlightthickness=0, cursor="crosshair")
         self.canevas.pack(fill="both", expand=True)
@@ -694,8 +798,10 @@ class FenetreVerification(tk.Toplevel):
 
     def _libelle(self, cle):
         zs = [z for z in self.zones[cle] if z.actif]
-        fait = " ✓" if self.manuel and an.chemin_sortie(self.src / cle, self.src, self.sortie).exists() else ""
-        return f"{cle}  ({len(zs)}){fait}"
+        marque = ""
+        if self.manuel:
+            marque = (" *" if cle in self.modifiees else "") + (" ✓" if cle in self.vues else "")
+        return f"{cle}  ({len(zs)}){marque}"
 
     def _remplir_liste(self):
         self.liste.delete(0, "end")
@@ -704,26 +810,24 @@ class FenetreVerification(tk.Toplevel):
             self._colorer(i)
 
     def _colorer(self, i):
-        # vérification : rien flouté = à regarder ; manuel : pas encore enregistrée
+        # vérification : rien flouté = à regarder ; manuel : pas encore vue
         if self.manuel:
-            fait = an.chemin_sortie(self.src / self.cles[i], self.src, self.sortie).exists()
-            self.liste.itemconfigure(i, foreground="" if fait else "#c07000")
+            self.liste.itemconfigure(i, foreground="" if self.cles[i] in self.vues else "#c07000")
         elif not any(z.actif for z in self.zones[self.cles[i]]):
             self.liste.itemconfigure(i, foreground="#c07000")
 
     def _maj_avancement(self):
         if not self.manuel:
             return
-        if self.faites is None:   # un seul parcours du disque, ensuite tenu à jour à l'écriture
-            self.faites = {k for k in self.cles if an.chemin_sortie(self.src / k, self.src, self.sortie).exists()}
-        faites = len(self.faites)
-        self.progres.configure(value=faites)
-        self.compteur.configure(text=f"{faites} / {len(self.cles)} enregistrées")
+        self.progres.configure(maximum=max(1, len(self.cles)), value=len(self.vues))
+        self.compteur.configure(text=f"{len(self.vues)} / {len(self.cles)} vues")
 
     def _maj_ligne(self, i):
         self.liste.delete(i)
         self.liste.insert(i, self._libelle(self.cles[i]))
         self._colorer(i)
+        if i == self.indice:
+            self.liste.selection_set(i)
 
     def _choisir(self):
         sel = self.liste.curselection()
@@ -744,47 +848,70 @@ class FenetreVerification(tk.Toplevel):
         self.liste.see(self.indice)
 
     def _quitter_photo(self):
-        """Mode manuel : enregistrement immédiat en quittant la photo."""
-        if not self.manuel or self.bgr is None:
-            return
-        cle = self.cles[self.indice]
-        if self.modifie or not an.chemin_sortie(self.src / cle, self.src, self.sortie).exists():
-            self._ecrire_photo()
-        self.modifie = False
+        """Rien n'est écrit en changeant de photo (mode manuel : tout à la fin)."""
 
     def _fermer(self):
-        try:
-            self._quitter_photo()
-            if self.manuel:
-                self._recopier_restantes()
-        finally:
+        if not self.manuel:
             self.destroy()
-
-    def _recopier_restantes(self):
-        """Photos jamais affichées : recopiées dans la sortie (avec leurs zones éventuelles),
-        pour que la sortie contienne toutes les photos du dossier."""
-        if self.faites is None:
-            self._maj_avancement()
-        restantes = [k for k in self.cles if k not in self.faites]
-        if not restantes:
             return
-        self.info.configure(text=f"Recopie des {len(restantes)} photo(s) non affichée(s) dans la sortie…")
-        for k in restantes:
+        if not self.modifiees and all(an.chemin_sortie(self.src / k, self.src, self.sortie).exists()
+                                      for k in self.cles):
+            self.destroy()   # rien de nouveau : la sortie est déjà complète
+            return
+        rep = messagebox.askyesnocancel(
+            "Mode manuel", "Enregistrer maintenant dans la sortie toutes les photos du dossier "
+                           f"({len(self.cles)}) ?\n\nOui : enregistrer puis fermer.\nNon : fermer sans rien "
+                           "copier.\nAnnuler : revenir aux photos.", parent=self)
+        if rep is None:
+            return
+        if rep:
+            self._enregistrer_tout()
+        self.destroy()
+
+    def _terminer(self):
+        self._enregistrer_tout()
+        self.destroy()
+
+    def _abandonner(self):
+        if self.modifiees and not messagebox.askyesno(
+                "Mode manuel", f"{len(self.modifiees)} photo(s) modifiée(s).\n\nFermer sans rien copier "
+                               "dans la sortie ?", parent=self):
+            return
+        self.destroy()
+
+    def _enregistrer_tout(self):
+        """Écrit dans la sortie toutes les photos du dossier (floutées ou recopiées) et les zones.
+        Les photos déjà présentes et non modifiées ne sont pas réécrites."""
+        a_ecrire = [k for k in self.cles if k in self.modifiees
+                    or not an.chemin_sortie(self.src / k, self.src, self.sortie).exists()]
+        self.b_terminer.configure(state="disabled")
+        self.progres.configure(maximum=max(1, len(a_ecrire)), value=0)
+        erreurs = 0
+        for n, k in enumerate(a_ecrire, 1):
             try:
                 bgr, pil = an.lire_image(self.src / k)
                 an.ecrire_image(an.flouter(bgr, self.zones.get(k, []), self.reg), pil,
                                 an.chemin_sortie(self.src / k, self.src, self.sortie), self.reg)
-                self.faites.add(k)
             except Exception:
-                pass   # photo illisible : ignorée, comme en automatique
-            self._maj_avancement()
+                erreurs += 1   # photo illisible : ignorée, comme en automatique
+            self.progres.configure(value=n)
+            self.compteur.configure(text=f"enregistrement {n} / {len(a_ecrire)}")
             self.update()
-        an.enregistrer_zones(self.sortie, self.src, {k: v for k, v in self.zones.items()
-                                                     if v or k in self.faites})
+        zones = an.charger_zones(self.sortie)
+        zones.update({k: v for k, v in self.zones.items() if k in self.cles})
+        an.enregistrer_zones(self.sortie, self.src, zones)
+        self.modifiees.clear()
+        if erreurs:
+            messagebox.showwarning("Mode manuel", f"{erreurs} photo(s) illisible(s) n'ont pas pu être "
+                                   "enregistrée(s).", parent=self)
 
     def _charger(self):
         cle = self.cles[self.indice]
         self.bgr, self.pil = an.lire_image(self.src / cle)
+        if self.manuel:
+            self.vues.add(cle)
+            self._maj_ligne(self.indice)
+            self._maj_avancement()
         self._afficher()
 
     def _afficher(self):
@@ -811,9 +938,8 @@ class FenetreVerification(tk.Toplevel):
         nm = sum(z.type == "manuel" for z in zones)
         nx = sum(not z.actif for z in zones)
         etat = ""
-        if self.manuel:
-            etat = (" — modifiée, enregistrée en changeant de photo" if self.modifie else
-                    " — enregistrée" if an.chemin_sortie(self.src / cle, self.src, self.sortie).exists() else "")
+        if self.manuel and cle in self.modifiees:
+            etat = " — modifiée (enregistrée à la fin)"
         self.info.configure(text=f"{self.indice + 1}/{len(self.cles)} — {cle} : {nv} visage(s) (rouge), "
                                  f"{npl} plaque(s) (bleu), {nm} ajoutée(s) (vert), {nx} écartée(s) (pointillés)"
                                  f" · pinceau {self.taille:.0%}{etat}")
@@ -906,7 +1032,7 @@ class FenetreVerification(tk.Toplevel):
     def _sauver(self):
         """Après une modification : écriture aussitôt (vérification) ou au changement de photo (manuel)."""
         if self.manuel:
-            self.modifie = True
+            self.modifiees.add(self.cles[self.indice])
         else:
             self._ecrire_photo()
         self._maj_ligne(self.indice)
@@ -914,16 +1040,11 @@ class FenetreVerification(tk.Toplevel):
         self._afficher()
 
     def _ecrire_photo(self):
+        """Mode vérification : la photo corrigée est réécrite aussitôt."""
         cle = self.cles[self.indice]
         an.ecrire_image(an.flouter(self.bgr, self.zones[cle], self.reg), self.pil,
                         an.chemin_sortie(self.src / cle, self.src, self.sortie), self.reg)
-        # on ne mémorise que les photos qui ont un fichier de sortie
-        a_garder = {k: v for k, v in self.zones.items()
-                    if v or an.chemin_sortie(self.src / k, self.src, self.sortie).exists()}
-        an.enregistrer_zones(self.sortie, self.src, a_garder)
-        if self.faites is not None:
-            self.faites.add(cle)
-        self._maj_avancement()
+        an.enregistrer_zones(self.sortie, self.src, self.zones)
         self._maj_ligne(self.indice)
 
 

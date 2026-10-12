@@ -24,7 +24,8 @@ DOSSIER_MODELES = Path(__file__).resolve().parent / "modeles"
 MODELE_VISAGE = DOSSIER_MODELES / "face_detection_yunet_2023mar.onnx"
 MODELE_PLAQUE = "yolo-v9-s-608-license-plate-end2end"
 EXTENSIONS = {".jpg", ".jpeg"}
-FICHIER_ZONES = "zones_anonymisation.json"   # emplacement des anciennes versions (dans la sortie)
+FICHIER_ZONES = "zones_anonymisation.json"   # dans le dossier de sortie, à côté des JPG
+# emplacement utilisé par une version intermédiaire (repris puis supprimé)
 DOSSIER_ZONES = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "anonymiseur_photos" / "zones"
 
 
@@ -233,17 +234,20 @@ def lister_photos(dossier: Path, sous_dossiers: bool, exclure: Path | None = Non
     return sorted(photos)
 
 
-def fichier_zones(dossier_sortie: Path) -> Path:
-    """Zones mémorisées (pour Vérifier / corriger), rangées HORS du dossier de sortie :
-    celui-ci ne doit contenir que les photos JPG anonymisées."""
+def _ancien_fichier_zones(dossier_sortie: Path) -> Path:
     cle = hashlib.sha1(str(Path(dossier_sortie).resolve()).lower().encode("utf-8")).hexdigest()[:16]
     return DOSSIER_ZONES / f"{cle}.json"
+
+
+def fichier_zones(dossier_sortie: Path) -> Path:
+    """Zones floutées de chaque photo (pour Vérifier / corriger), dans le dossier de sortie."""
+    return Path(dossier_sortie) / FICHIER_ZONES
 
 
 def charger_zones(dossier_sortie: Path) -> dict[str, list[Zone]]:
     f = fichier_zones(dossier_sortie)
     if not f.exists():
-        f = Path(dossier_sortie) / FICHIER_ZONES   # ancienne version : fichier dans la sortie
+        f = _ancien_fichier_zones(dossier_sortie)
         if not f.exists():
             return {}
     data = json.loads(f.read_text(encoding="utf-8"))
@@ -253,11 +257,12 @@ def charger_zones(dossier_sortie: Path) -> dict[str, list[Zone]]:
 def enregistrer_zones(dossier_sortie: Path, source: Path, zones: dict[str, list[Zone]]) -> None:
     f = fichier_zones(dossier_sortie)
     f.parent.mkdir(parents=True, exist_ok=True)
-    data = {"source": str(source), "sortie": str(Path(dossier_sortie).resolve()),
-            "photos": {k: [asdict(z) for z in v] for k, v in zones.items()}}
-    f.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    ancien = Path(dossier_sortie) / FICHIER_ZONES
-    if ancien.exists():   # migration : la sortie ne garde que des JPG
+    data = {"source": str(source), "photos": {k: [asdict(z) for z in v] for k, v in zones.items()}}
+    tmp = f.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, f)
+    ancien = _ancien_fichier_zones(dossier_sortie)
+    if ancien.exists():
         ancien.unlink()
 
 
